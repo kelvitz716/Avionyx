@@ -3,8 +3,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 import os
 
-# Ensure the data directory exists (optional, but good practice)
-DB_PATH = "sqlite:///avionyx.db"
+# Database path - configurable via environment variable for Docker
+DB_PATH = os.getenv("DB_PATH", "sqlite:///avionyx.db")
 
 Base = declarative_base()
 

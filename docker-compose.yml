@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  avionyx-bot:
+    build: .
+    container_name: avionyx-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite database
+      - avionyx_data:/app/data
+    environment:
+      - DB_PATH=sqlite:///data/avionyx.db
+
+volumes:
+  avionyx_data:
+    driver: local
