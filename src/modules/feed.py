@@ -2,7 +2,7 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from database import get_db, DailyEntry, SystemSettings
+from database import get_db, DailyEntry, SystemSettings, AuditLog
 from datetime import date
 from utils import get_back_home_keyboard, get_main_menu_keyboard
 
@@ -92,6 +92,13 @@ async def receive_unit(callback: types.CallbackQuery, state: FSMContext):
     entry.feed_used_kg += kg_used
     entry.feed_cost += cost
     
+    # Audit log
+    log = AuditLog(
+        user_id=callback.from_user.id,
+        action="feed_recorded",
+        details=f"Used: {kg_used:.2f} kg, Cost: {cost:.2f}"
+    )
+    db.add(log)
     db.commit()
     db.close()
     

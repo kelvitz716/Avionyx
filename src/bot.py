@@ -23,6 +23,7 @@ async def main():
     from modules.flock import router as flock_router
     from modules.reports import router as reports_router
     from modules.settings import router as settings_router
+    from modules.alerts import router as alerts_router
     
     dp.include_router(eggs_router)
     dp.include_router(sales_router)
@@ -30,6 +31,7 @@ async def main():
     dp.include_router(flock_router)
     dp.include_router(reports_router)
     dp.include_router(settings_router)
+    dp.include_router(alerts_router)
 
     # Main Menu Handler (attached to dp directly for now or a common router)
     from utils import get_main_menu_keyboard

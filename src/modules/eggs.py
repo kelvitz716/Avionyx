@@ -1,7 +1,7 @@
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from database import get_db, DailyEntry
+from database import get_db, DailyEntry, AuditLog
 from datetime import date
 from utils import get_back_home_keyboard, get_main_menu_keyboard
 
@@ -72,6 +72,13 @@ async def receive_broken_count(message: types.Message, state: FSMContext):
     entry.eggs_broken = eggs_broken
     entry.eggs_good = eggs_good
     
+    # Audit log
+    log = AuditLog(
+        user_id=message.from_user.id,
+        action="eggs_collected",
+        details=f"Total: {eggs_total}, Broken: {eggs_broken}, Good: {eggs_good}"
+    )
+    db.add(log)
     db.commit()
     db.close()
     

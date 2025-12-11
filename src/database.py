@@ -46,6 +46,15 @@ class SystemSettings(Base):
     key = Column(String, unique=True, nullable=False)
     value = Column(String, nullable=False) # Store everything as string, cast on use
 
+class AuditLog(Base):
+    __tablename__ = 'audit_logs'
+    
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, default=datetime.now, nullable=False)
+    user_id = Column(Integer, nullable=False)  # Telegram user ID
+    action = Column(String, nullable=False)  # e.g., "eggs_added", "feed_recorded", "flock_mortality"
+    details = Column(String, default="")  # JSON or human-readable details
+
 def init_db():
     engine = create_engine(DB_PATH, echo=False)
     Base.metadata.create_all(engine)

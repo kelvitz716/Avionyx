@@ -8,6 +8,7 @@ def get_main_menu_keyboard():
         [InlineKeyboardButton(text="⚰️ Mortality", callback_data='menu_mortality')],
         [InlineKeyboardButton(text="🐥 Flock Count", callback_data='menu_flock')],
         [InlineKeyboardButton(text="📊 Reports", callback_data='menu_reports')],
+        [InlineKeyboardButton(text="🔔 Alerts", callback_data='menu_alerts')],
         [InlineKeyboardButton(text="⚙️ Settings", callback_data='menu_settings')]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)

@@ -2,7 +2,7 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from database import get_db, DailyEntry, SystemSettings
+from database import get_db, DailyEntry, SystemSettings, AuditLog
 from datetime import date
 from sqlalchemy import desc
 from utils import get_back_home_keyboard, get_main_menu_keyboard
@@ -93,16 +93,16 @@ async def receive_count(message: types.Message, state: FSMContext):
         await state.set_state(FlockStates.reason)
         return
     
-    await process_flock_update(message, state)
+    await process_flock_update(message, state, message.from_user.id)
 
 @router.callback_query(FlockStates.reason, F.data.startswith("reason_"))
 async def receive_reason(callback: types.CallbackQuery, state: FSMContext):
     reason = callback.data.replace('reason_', '')
     await state.update_data(flock_reason=reason)
-    await process_flock_update(callback.message, state) # reuse msg object
+    await process_flock_update(callback.message, state, callback.from_user.id) # reuse msg object
     await callback.answer()
 
-async def process_flock_update(message: types.Message, state: FSMContext):
+async def process_flock_update(message: types.Message, state: FSMContext, user_id: int):
     data = await state.get_data()
     action = data.get('flock_action')
     count = data.get('flock_count')
@@ -138,6 +138,13 @@ async def process_flock_update(message: types.Message, state: FSMContext):
         entry.flock_total -= count
         entry.mortality_reasons = f"{entry.mortality_reasons}, {reason} ({count})" if entry.mortality_reasons else f"{reason} ({count})"
 
+    # Audit log
+    log = AuditLog(
+        user_id=user_id,
+        action=f"flock_{action.replace('action_', '')}",
+        details=f"Count: {count}, Reason: {reason}, Total: {entry.flock_total}"
+    )
+    db.add(log)
     db.commit()
     new_total = entry.flock_total
     db.close()
