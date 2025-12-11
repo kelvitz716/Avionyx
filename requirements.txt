@@ -2,3 +2,4 @@ aiogram==3.*
 sqlalchemy==2.*
 python-dotenv==1.*
 pytest==8.*
+alembic==1.*
