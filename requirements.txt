@@ -1,0 +1,3 @@
+aiogram==3.*
+sqlalchemy==2.*
+python-dotenv==1.*
