@@ -8,11 +8,8 @@ services:
     env_file:
       - .env
     volumes:
-      # Persist SQLite database
-      - avionyx_data:/app/data
+      # Persist SQLite database via Bind Mount for easy backup
+      # Using :z for SELinux compatibility (Fedora/RHEL)
+      - ./data:/app/data:z
     environment:
-      - DB_PATH=sqlite:///data/avionyx.db
-
-volumes:
-  avionyx_data:
-    driver: local
+      - DB_PATH=sqlite:////app/data/avionyx.db

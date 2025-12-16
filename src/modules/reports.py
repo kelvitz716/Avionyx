@@ -1,5 +1,7 @@
-from aiogram import Router, types, F
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram import Router, types, F, Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
+import csv
+import io
 from database import get_db, DailyEntry
 from datetime import date, timedelta
 from utils import get_back_home_keyboard, format_currency
@@ -12,6 +14,7 @@ async def menu_reports(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="📅 Today's Summary", callback_data='report_daily')],
         [InlineKeyboardButton(text="🗓️ Last 7 Days", callback_data='report_weekly')],
         [InlineKeyboardButton(text="📆 Monthly Report", callback_data='report_month')],
+        [InlineKeyboardButton(text="📥 Export Data (CSV)", callback_data='report_export')],
         [InlineKeyboardButton(text="⬅️ Back", callback_data='main_menu')]
     ]
     
@@ -151,3 +154,49 @@ async def show_monthly_report(callback: types.CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
     await callback.answer()
+
+@router.callback_query(F.data == "report_export")
+async def export_data(callback: types.CallbackQuery, bot: Bot):
+    await callback.answer("⏳ Generating export...", show_alert=False)
+    
+    db = next(get_db())
+    entries = db.query(DailyEntry).order_by(DailyEntry.date.desc()).all()
+    db.close()
+    
+    if not entries:
+        await callback.message.answer("⚠️ No data available to export.")
+        return
+
+    # Generate CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Header
+    writer.writerow(['Date', 'Eggs Collected', 'Eggs Broken', 'Feed Used (kg)', 'Feed Cost', 'Income', 'Mortality', 'Flock Total', 'Notes'])
+    
+    # Data
+    for e in entries:
+        writer.writerow([
+            e.date,
+            e.eggs_collected,
+            e.eggs_broken,
+            e.feed_used_kg,
+            e.feed_cost,
+            e.income,
+            e.mortality_count,
+            e.flock_total,
+            e.notes or ""
+        ])
+        
+    output.seek(0)
+    csv_bytes = output.getvalue().encode('utf-8')
+    
+    # Send document
+    file = BufferedInputFile(csv_bytes, filename=f"avionyx_export_{date.today()}.csv")
+    
+    await bot.send_document(
+        chat_id=callback.from_user.id,
+        document=file,
+        caption=f"📊 **Avionyx Data Export**\n📅 Generated on: {date.today()}",
+        parse_mode="Markdown"
+    )

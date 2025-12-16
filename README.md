@@ -14,77 +14,44 @@ A Telegram bot for managing poultry farm operations including egg collection, fe
 
 ## Quick Start
 
-### Option 1: Docker (Recommended)
+### Option 1: One-Click Deployment (Recommended)
 
-1. Clone the repository
-2. Copy `.env.example` to `.env` and fill in your Telegram bot token:
+1. Clone the repository.
+2. Run the deployment script:
    ```bash
-   cp .env.example .env
-   nano .env  # Add your TELEGRAM_TOKEN and ADMIN_IDS
+   chmod +x scripts/deploy.sh
+   ./scripts/deploy.sh
+   ```
+   _This script will guide you through setup. For help getting your Bot Token and Admin ID, see [docs/setup_credentials.md](docs/setup_credentials.md)._
+
+### Option 2: Manual Deployment
+
+If you prefer to run commands manually:
+
+1. Copy `.env.example` to `.env` and fill in your credentials.
+2. Create the data directory: `mkdir -p data`.
+3. Build and proper start:
+   ```bash
+   docker-compose up -d --build
    ```
 
-3. Start with Docker Compose:
-   ```bash
-   docker-compose up -d
-   ```
+## Backup & Recovery
 
-4. View logs:
-   ```bash
-   docker-compose logs -f
-   ```
+We provide automated scripts for data safety.
 
-### Option 2: Manual Setup
+- **Backup**:
+  ```bash
+  ./scripts/backup.sh
+  ```
+  _Creates a `.tar.gz` archive in the `./backups` directory._
 
-1. Create virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate
-   ```
+- **Restore**:
+  ```bash
+  ./scripts/restore.sh backups/avionyx_backup_<timestamp>.tar.gz
+  ```
+  _Restores the data folder from the archive._
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Configure environment:
-   ```bash
-   cp .env.example .env
-   nano .env  # Add your credentials
-   ```
-
-4. Run migrations (if needed):
-   ```bash
-   alembic upgrade head
-   ```
-
-5. Start the bot:
-   ```bash
-   python src/bot.py
-   ```
-
-## Configuration
-
-| Variable | Description |
-|----------|-------------|
-| `TELEGRAM_TOKEN` | Bot token from @BotFather |
-| `ADMIN_IDS` | Comma-separated Telegram user IDs with access |
-
-## Database
-
-The bot uses SQLite by default. The database file is `avionyx.db` in the project root (or `/app/data/avionyx.db` in Docker).
-
-### Migrations
-
-```bash
-# Apply migrations
-alembic upgrade head
-
-# Create new migration after model changes
-alembic revision --autogenerate -m "Description"
-
-# Rollback last migration
-alembic downgrade -1
-```
+For more details, see [docs/volumes_and_backups.md](docs/volumes_and_backups.md).
 
 ## Testing
 
