@@ -24,3 +24,5 @@ backups/
 .DS_Store
 Thumbs.db
 FUTURE_IMPROVEMENTS.md
+alembic/versions/ef482ec249dc_add_finance_tables.py
+tests/test_finance_inventory.py

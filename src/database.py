@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import datetime
+from datetime import datetime, date
 import os
 
 # Database path - configurable via environment variable for Docker
@@ -55,6 +55,53 @@ class AuditLog(Base):
     action = Column(String, nullable=False)  # e.g., "eggs_added", "feed_recorded", "flock_mortality"
     details = Column(String, default="")  # JSON or human-readable details
 
+class InventoryItem(Base):
+    __tablename__ = 'inventory_items'
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False) # FEED, MEDICATION, EQUIPMENT
+    quantity = Column(Float, default=0.0)
+    unit = Column(String, default="units")
+    cost_per_unit = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class Expense(Base):
+    __tablename__ = 'expenses'
+    
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, default=date.today)
+    category = Column(String, nullable=False) # FEED, MEDS, LABOR, OTHER
+    amount = Column(Float, nullable=False)
+    description = Column(String)
+    user_id = Column(Integer)
+    created_at = Column(DateTime, default=datetime.now)
+
+class BirdSale(Base):
+    __tablename__ = 'bird_sales'
+    
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, default=date.today)
+    quantity = Column(Integer, nullable=False)
+    price_per_bird = Column(Float, nullable=False)
+    total_amount = Column(Float, nullable=False)
+    buyer_name = Column(String)
+    created_at = Column(DateTime, default=datetime.now)
+
+class Transaction(Base):
+    __tablename__ = 'transactions'
+    
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, default=date.today)
+    type = Column(String, nullable=False) # INCOME, EXPENSE
+    category = Column(String, nullable=False)
+    amount = Column(Float, nullable=False)
+    description = Column(String)
+    related_id = Column(Integer) # ID of Expense or BirdSale or DailyEntry
+    related_table = Column(String) # 'expenses', 'bird_sales', 'daily_entries'
+    created_at = Column(DateTime, default=datetime.now)
+
 def init_db():
     engine = create_engine(DB_PATH, echo=False)
     Base.metadata.create_all(engine)
@@ -63,7 +110,8 @@ def init_db():
 # Global session factory (to be used by usage code)
 engine = create_engine(DB_PATH, echo=False, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base.metadata.create_all(engine)
+# Base.metadata.create_all(engine) - Managed by Alembic now
+
 
 def get_db():
     db = SessionLocal()
