@@ -1,7 +1,7 @@
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from database import get_db, DailyEntry, AuditLog
+from database import get_db, DailyEntry, AuditLog, InventoryLog
 from datetime import date
 from utils import get_back_home_keyboard, get_main_menu_keyboard
 
@@ -72,6 +72,31 @@ async def receive_broken_count(message: types.Message, state: FSMContext):
     entry.eggs_broken = eggs_broken
     entry.eggs_good = eggs_good
     
+    # Log Inventory Production (Good Eggs)
+    inv_log = InventoryLog(
+        item_name="Eggs",
+        quantity_change=eggs_good,
+        flock_id="General" # Placeholder
+    )
+    db.add(inv_log)
+    
+    # Update Stock Cache
+    from database import InventoryItem
+    egg_item = db.query(InventoryItem).filter_by(name="Eggs").first()
+    if not egg_item:
+        egg_item = InventoryItem(
+            name="Eggs",
+            type="PRODUCE",
+            quantity=0,
+            unit="eggs",
+            cost_per_unit=0 # Product, not expense
+        )
+        db.add(egg_item)
+        db.flush()
+        
+    egg_item.quantity += eggs_good
+    new_quantity = egg_item.quantity
+    
     # Audit log
     log = AuditLog(
         user_id=message.from_user.id,
@@ -87,7 +112,8 @@ async def receive_broken_count(message: types.Message, state: FSMContext):
         text=f"✔️ **Saved!**\n\n"
              f"🥚 Total: {eggs_total}\n"
              f"❌ Broken: {eggs_broken}\n"
-             f"✅ Good: {eggs_good}",
+             f"✅ Good: {eggs_good} (Added to Stock: {new_quantity})",
         parse_mode="Markdown",
         reply_markup=get_main_menu_keyboard()
     )
+

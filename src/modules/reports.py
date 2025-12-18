@@ -14,6 +14,7 @@ async def menu_reports(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="📅 Today's Summary", callback_data='report_daily')],
         [InlineKeyboardButton(text="🗓️ Last 7 Days", callback_data='report_weekly')],
         [InlineKeyboardButton(text="📆 Monthly Report", callback_data='report_month')],
+        [InlineKeyboardButton(text="📉 Profit & Loss", callback_data='report_pnl')],
         [InlineKeyboardButton(text="📥 Export Data (CSV)", callback_data='report_export')],
         [InlineKeyboardButton(text="⬅️ Back", callback_data='main_menu')]
     ]
@@ -200,3 +201,25 @@ async def export_data(callback: types.CallbackQuery, bot: Bot):
         caption=f"📊 **Avionyx Data Export**\n📅 Generated on: {date.today()}",
         parse_mode="Markdown"
     )
+
+@router.callback_query(F.data == "report_pnl")
+async def show_pnl(callback: types.CallbackQuery):
+    from database import FinancialLedger # Import inside to avoid circular deps if any
+    db = next(get_db())
+    
+    ledgers = db.query(FinancialLedger).all()
+    income = sum(l.amount for l in ledgers if l.direction == "IN")
+    expense = sum(l.amount for l in ledgers if l.direction == "OUT")
+    net_profit = income - expense
+    
+    text = (f"📉 **P&L Statement**\n\n"
+            f"💰 **Total Income**: {format_currency(income)}\n"
+            f"💸 **Total Expenses**: {format_currency(expense)}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"**Net Profit**: {format_currency(net_profit)}")
+    
+    db.close()
+    
+    keyboard = [[InlineKeyboardButton(text="⬅️ Back", callback_data="menu_reports")]]
+    await callback.message.edit_text(text=text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    await callback.answer()

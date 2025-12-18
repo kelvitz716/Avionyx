@@ -2,7 +2,7 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from database import get_db, DailyEntry, SystemSettings, AuditLog, InventoryItem
+from database import get_db, DailyEntry, SystemSettings, AuditLog, InventoryItem, InventoryLog
 from datetime import date
 from utils import get_back_home_keyboard, get_main_menu_keyboard
 
@@ -93,22 +93,48 @@ async def receive_unit(callback: types.CallbackQuery, state: FSMContext):
     amount = data.get('feed_amount')
     item_id = data.get('item_id')
     
+    today = date.today()
+    
     db = next(get_db())
+    # Defaults
     weight_setting = db.query(SystemSettings).filter_by(key="feed_bag_weight").first()
     cost_setting = db.query(SystemSettings).filter_by(key="feed_bag_cost").first()
-    
     bag_weight = float(weight_setting.value) if weight_setting else DEFAULT_BAG_WEIGHT
     bag_cost = float(cost_setting.value) if cost_setting else DEFAULT_BAG_COST
+    
+    item = None
+    if item_id:
+        item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
     
     kg_used = 0.0
     cost = 0.0
     
     if unit == 'unit_kg':
         kg_used = amount
-        cost = amount * (bag_cost / bag_weight)
-    else:
+        if item and item.cost_per_unit > 0:
+            # If item unit is KG, direct mult. If Bags, need conversion.
+            # Simplified: Assuming InventoryItem stores cost PER UNIT.
+            if item.unit.lower() in ['bag', 'bags']:
+                # Item cost is per bag. We used KG.
+                # Cost = (Amount KG / Bag Weight) * Cost per Bag
+                cost = (amount / bag_weight) * item.cost_per_unit
+            else:
+                 # Assume Unit is KG or similar linear
+                 cost = amount * item.cost_per_unit
+        else:
+             # Fallback to Settings
+             cost = amount * (bag_cost / bag_weight)
+             
+    else: # Bags
         kg_used = amount * bag_weight
-        cost = amount * bag_cost
+        if item and item.cost_per_unit > 0:
+             if item.unit.lower() in ['bag', 'bags']:
+                 cost = amount * item.cost_per_unit
+             else:
+                 # Item cost is per KG?
+                 cost = (amount * bag_weight) * item.cost_per_unit
+        else:
+             cost = amount * bag_cost
         
     today = date.today()
     entry = db.query(DailyEntry).filter(DailyEntry.date == today).first()
@@ -120,40 +146,54 @@ async def receive_unit(callback: types.CallbackQuery, state: FSMContext):
     entry.feed_used_kg += kg_used
     entry.feed_cost += cost
     
-    # Deduct from inventory
+    # Deduct from inventory & Log
     inv_msg = ""
+    item_name = "Generic Feed"
+    
     if item_id:
         item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
         if item:
-            # Simple conversion if units mismatch? 
-            # Assuming user inputs consistent units or we handle it later.
-            # Ideally Inventory should store consistently (e.g., kg).
-            # If item.unit != 'kg', we might have issue.
-            # For simplicity, we deduct 'amount' if unit matches, or just log note?
-            # Let's deduct from 'quantity' blindly for now, assuming user knows?
-            # Or better, deduct converted KG if item unit is KG?
-            if item.unit.lower() in ['kg', 'kgs']:
-                 item.quantity -= kg_used
-            elif item.unit.lower() in ['bag', 'bags']:
-                 # Convert to bags
-                 bags = kg_used / bag_weight
-                 item.quantity -= bags
-            else:
-                 # Just deduct the raw number entered? risky.
-                 # Let's rely on kg_used if we can.
-                 item.quantity -= amount # Fallback to raw input
+            item_name = item.name
             
-            inv_msg = f" (Deducted from {item.name})"
-            if item.quantity < 10: # Low stock warning logic could go here
+            # Update cache quantity
+            deduction = amount # Assume unit matches for now or we rely on logs?
+            # Correct logic: We should standardize. But logic above did unit conversion.
+            # Let's standardize on LOGGING KG if possible, or whatever unit user used?
+            # Let's log 'Quantity Change' in ITEM UNITS (InventoryItem.unit).
+            # If item.unit is 'bags', we deduct bags.
+            
+            change = 0.0
+            if item.unit.lower() in ['kg', 'kgs']:
+                 change = kg_used
+            elif item.unit.lower() in ['bag', 'bags']:
+                 # Convert if input was kg
+                 if unit == 'unit_kg': change = amount / bag_weight
+                 else: change = amount
+            else:
+                 change = amount # Fallback
+            
+            item.quantity -= change
+            inv_msg = f" (Deducted {change:.2f} {item.unit} from {item.name})"
+            if item.quantity < 10: 
                 inv_msg += " ⚠️ Low Stock!"
+            
+            # Log to InventoryLog
+            log = InventoryLog(
+                item_name=item.name,
+                quantity_change= -change, # Negative
+                # flock_id? We don't have flock selection here yet (User plan said 'Select Flock'), 
+                # but 'Digital Clipboard' flow often assumes active flock or 'All'.
+                # For now leaving flock_id blank or 'General'.
+            )
+            db.add(log)
 
     # Audit log
-    log = AuditLog(
+    audit = AuditLog(
         user_id=callback.from_user.id,
         action="feed_recorded",
         details=f"Used: {kg_used:.2f} kg, Cost: {cost:.2f}{inv_msg}"
     )
-    db.add(log)
+    db.add(audit)
     db.commit()
     db.close()
     
@@ -166,3 +206,4 @@ async def receive_unit(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=get_main_menu_keyboard()
     )
     await callback.answer()
+

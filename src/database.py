@@ -1,12 +1,61 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Boolean
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, Enum
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime, date
 import os
+import shutil
 
-# Database path - configurable via environment variable for Docker
-DB_PATH = os.getenv("DB_PATH", "sqlite:///avionyx.db")
+# Database paths
+PROD_DB_PATH = os.getenv("DB_PATH", "sqlite:///avionyx.db")
+DEMO_DB_PATH = "sqlite:///avionyx_demo.db"
+DEMO_FILE = "avionyx_demo.db"
 
 Base = declarative_base()
+
+# Global State
+IS_DEMO_MODE = False
+
+class Contact(Base):
+    __tablename__ = 'contacts'
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    role = Column(String, nullable=False) # SUPPLIER, CUSTOMER, VET, STAFF
+    phone = Column(String)
+    trust_score = Column(Integer, default=50) # AI metric (0-100)
+    notes = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.now)
+
+class FinancialLedger(Base):
+    __tablename__ = 'financial_ledger'
+    
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, default=date.today)
+    description = Column(String)
+    amount = Column(Float, nullable=False)
+    direction = Column(String, nullable=False) # IN, OUT
+    payment_method = Column(String, default="CASH") # CASH, MPESA, CREDIT
+    transaction_ref = Column(String) # M-Pesa Code
+    category = Column(String, nullable=False) # Feed, Meds, Bird Sales, Egg Sales, Labor, Consultation
+    
+    contact_id = Column(Integer, ForeignKey('contacts.id'), nullable=True) # Optional (e.g. misc expense)
+    contact = relationship("Contact")
+    
+    created_at = Column(DateTime, default=datetime.now)
+
+class InventoryLog(Base):
+    __tablename__ = 'inventory_logs'
+    
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, default=date.today)
+    item_name = Column(String, nullable=False) # 'Growers Mash', 'Kenbro Chick'
+    quantity_change = Column(Float, nullable=False) # +50 or -10
+    
+    flock_id = Column(String, nullable=True) # Optional link to flock ID string
+    
+    ledger_id = Column(Integer, ForeignKey('financial_ledger.id'), nullable=True)
+    ledger = relationship("FinancialLedger")
+    
+    created_at = Column(DateTime, default=datetime.now)
 
 class DailyEntry(Base):
     __tablename__ = 'daily_entries'
@@ -19,18 +68,18 @@ class DailyEntry(Base):
     eggs_broken = Column(Integer, default=0)
     eggs_good = Column(Integer, default=0) # Computed/Stored for ease
     
-    # Sales
+    # Sales (Metrics only - financial detail in Ledger)
     eggs_sold = Column(Integer, default=0)
     crates_sold = Column(Integer, default=0)
     income = Column(Float, default=0.0)
     
-    # Feed
+    # Feed (Metrics only)
     feed_used_kg = Column(Float, default=0.0)
     feed_cost = Column(Float, default=0.0)
     
     # Mortality & Flock
     mortality_count = Column(Integer, default=0)
-    mortality_reasons = Column(String, default="") # JSON or comma-separated if multiple reasons in a day
+    mortality_reasons = Column(String, default="") 
     flock_added = Column(Integer, default=0)
     flock_removed = Column(Integer, default=0)
     flock_total = Column(Integer, default=0)
@@ -56,6 +105,10 @@ class AuditLog(Base):
     details = Column(String, default="")  # JSON or human-readable details
 
 class InventoryItem(Base):
+    """
+    Kept for 'Current Stock' definition and pricing cache.
+    Real-time stock could be calculated from logs, but this is faster for 'Select Item' menus.
+    """
     __tablename__ = 'inventory_items'
     
     id = Column(Integer, primary_key=True)
@@ -67,54 +120,56 @@ class InventoryItem(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-class Expense(Base):
-    __tablename__ = 'expenses'
+class Flock(Base):
+    __tablename__ = 'flocks'
     
     id = Column(Integer, primary_key=True)
-    date = Column(Date, default=date.today)
-    category = Column(String, nullable=False) # FEED, MEDS, LABOR, OTHER
-    amount = Column(Float, nullable=False)
-    description = Column(String)
-    user_id = Column(Integer)
+    name = Column(String, nullable=False) # e.g. "Flock A - Dec 2025"
+    breed = Column(String, nullable=False) # Kuroiler, Broiler, etc
+    hatch_date = Column(Date, nullable=False)
+    initial_count = Column(Integer, default=0)
+    status = Column(String, default="ACTIVE") # ACTIVE, SOLD, ARCHIVED
     created_at = Column(DateTime, default=datetime.now)
 
-class BirdSale(Base):
-    __tablename__ = 'bird_sales'
-    
-    id = Column(Integer, primary_key=True)
-    date = Column(Date, default=date.today)
-    quantity = Column(Integer, nullable=False)
-    price_per_bird = Column(Float, nullable=False)
-    total_amount = Column(Float, nullable=False)
-    buyer_name = Column(String)
-    created_at = Column(DateTime, default=datetime.now)
 
-class Transaction(Base):
-    __tablename__ = 'transactions'
-    
-    id = Column(Integer, primary_key=True)
-    date = Column(Date, default=date.today)
-    type = Column(String, nullable=False) # INCOME, EXPENSE
-    category = Column(String, nullable=False)
-    amount = Column(Float, nullable=False)
-    description = Column(String)
-    related_id = Column(Integer) # ID of Expense or BirdSale or DailyEntry
-    related_table = Column(String) # 'expenses', 'bird_sales', 'daily_entries'
-    created_at = Column(DateTime, default=datetime.now)
+# Engine Instances
+prod_engine = create_engine(PROD_DB_PATH, echo=False, connect_args={"check_same_thread": False})
+ProdSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=prod_engine)
+
+# Placeholder for Demo Engine (Lazy load)
+demo_engine = None
+DemoSessionLocal = None
 
 def init_db():
-    engine = create_engine(DB_PATH, echo=False)
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)()
+    # Mainly for manual init, ALembic handles migration usually
+    Base.metadata.create_all(prod_engine)
+    return sessionmaker(bind=prod_engine)()
 
-# Global session factory (to be used by usage code)
-engine = create_engine(DB_PATH, echo=False, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-# Base.metadata.create_all(engine) - Managed by Alembic now
+def init_demo_db():
+    global demo_engine, DemoSessionLocal
+    demo_engine = create_engine(DEMO_DB_PATH, echo=False, connect_args={"check_same_thread": False})
+    Base.metadata.create_all(demo_engine)
+    DemoSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=demo_engine)
 
+def wipe_demo_db():
+    global demo_engine, DemoSessionLocal, IS_DEMO_MODE
+    if demo_engine:
+        demo_engine.dispose()
+    demo_engine = None
+    DemoSessionLocal = None
+    IS_DEMO_MODE = False
+    
+    if os.path.exists(DEMO_FILE):
+        os.remove(DEMO_FILE)
 
 def get_db():
-    db = SessionLocal()
+    if IS_DEMO_MODE:
+        if not DemoSessionLocal:
+            init_demo_db()
+        db = DemoSessionLocal()
+    else:
+        db = ProdSessionLocal()
+        
     try:
         yield db
     finally:

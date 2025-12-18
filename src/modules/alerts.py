@@ -1,7 +1,7 @@
 """Alerts & Notifications module for proactive monitoring."""
 from aiogram import Router, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from database import get_db, DailyEntry, SystemSettings, AuditLog
+from database import get_db, DailyEntry, SystemSettings, AuditLog, Flock
 from datetime import date, timedelta
 from sqlalchemy import desc
 from utils import get_back_home_keyboard
@@ -11,6 +11,14 @@ router = Router()
 # Default thresholds
 DEFAULT_FEED_LOW_THRESHOLD = 50.0  # kg
 DEFAULT_EGG_DROP_THRESHOLD = 20  # percentage
+
+# Vaccination Schedule (Day: Vaccine)
+VACCINE_SCHEDULE = {
+    7: "Gumboro (1st Dose)",
+    14: "Gumboro (Booster)",
+    21: "Newcastle (Lasota)",
+    28: "Newcastle (Booster)"
+}
 
 def get_setting_value(db, key: str, default: float) -> float:
     """Get a setting value or return default."""
@@ -61,6 +69,27 @@ def check_egg_production_anomaly(db) -> str | None:
     
     return None
 
+def check_vaccination_schedule(db) -> list[str]:
+    """Check for vaccination dues for active flocks. Returns list of alerts."""
+    alerts = []
+    active_flocks = db.query(Flock).filter_by(status="ACTIVE").all()
+    today = date.today()
+    
+    for flock in active_flocks:
+        age_days = (today - flock.hatch_date).days
+        
+        # Check if due today or tomorrow
+        # Today
+        vaccine = VACCINE_SCHEDULE.get(age_days)
+        if vaccine:
+            alerts.append(f"💉 **Vaccination Due TODAY!**\nFlock: {flock.name} (Age: {age_days} days)\nVaccine: {vaccine}")
+            
+        # Tomorrow
+        vaccine_tmr = VACCINE_SCHEDULE.get(age_days + 1)
+        if vaccine_tmr:
+            alerts.append(f"🔔 **Vaccination Reminder**\nFlock: {flock.name} will be {age_days+1} days old tomorrow.\nPrepare for: {vaccine_tmr}")
+            
+    return alerts
 
 def run_all_checks(db) -> list[str]:
     """Run all alert checks and return list of alert messages."""
@@ -73,6 +102,9 @@ def run_all_checks(db) -> list[str]:
     egg_alert = check_egg_production_anomaly(db)
     if egg_alert:
         alerts.append(egg_alert)
+        
+    vaccine_alerts = check_vaccination_schedule(db)
+    alerts.extend(vaccine_alerts)
     
     return alerts
 
@@ -129,3 +161,4 @@ async def view_audit_logs(callback: types.CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
     await callback.answer()
+
