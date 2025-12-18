@@ -104,6 +104,17 @@ class AuditLog(Base):
     action = Column(String, nullable=False)  # e.g., "eggs_added", "feed_recorded", "flock_mortality"
     details = Column(String, default="")  # JSON or human-readable details
 
+class User(Base):
+    """Bot users with role-based access control."""
+    __tablename__ = 'users'
+    
+    id = Column(Integer, primary_key=True)
+    telegram_id = Column(Integer, unique=True, nullable=False)
+    name = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="STAFF")  # ADMIN, MANAGER, STAFF
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+
 class InventoryItem(Base):
     """
     Kept for 'Current Stock' definition and pricing cache.
@@ -113,22 +124,59 @@ class InventoryItem(Base):
     
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
-    type = Column(String, nullable=False) # FEED, MEDICATION, EQUIPMENT
+    type = Column(String, nullable=False)  # FEED, MEDICATION, EQUIPMENT, LIVESTOCK
     quantity = Column(Float, default=0.0)
     unit = Column(String, default="units")
     cost_per_unit = Column(Float, default=0.0)
+    # New fields for enhanced tracking
+    expiry_date = Column(Date, nullable=True)  # For medications/vaccines
+    bag_weight = Column(Float, nullable=True)  # Weight per bag in kg (for FEED type)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 
 class Flock(Base):
     __tablename__ = 'flocks'
     
     id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False) # e.g. "Flock A - Dec 2025"
-    breed = Column(String, nullable=False) # Kuroiler, Broiler, etc
+    name = Column(String, nullable=False)  # e.g. "Flock A - Dec 2025"
+    breed = Column(String, nullable=False)  # Kuroiler, Broiler, etc
     hatch_date = Column(Date, nullable=False)
     initial_count = Column(Integer, default=0)
-    status = Column(String, default="ACTIVE") # ACTIVE, SOLD, ARCHIVED
+    current_count = Column(Integer, default=0)  # Track current live count
+    hens_count = Column(Integer, default=0)     # Number of females (for egg production stats)
+    roosters_count = Column(Integer, default=0) # Number of males
+    status = Column(String, default="ACTIVE")  # ACTIVE, SOLD, ARCHIVED
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class VaccinationRecord(Base):
+    """Track vaccination events per flock with scheduling for next dose."""
+    __tablename__ = 'vaccination_records'
+    
+    id = Column(Integer, primary_key=True)
+    flock_id = Column(Integer, ForeignKey('flocks.id'), nullable=False)
+    flock = relationship("Flock")
+    vaccine_name = Column(String, nullable=False)
+    doses_used = Column(Integer, nullable=False)
+    birds_vaccinated = Column(Integer, nullable=False)
+    date = Column(Date, default=date.today)
+    next_due_date = Column(Date, nullable=True)  # Scheduled reminder
+    vaccinator = Column(String, default="Self")  # Who administered
+    notes = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class DailyFeedUsage(Base):
+    """Track multiple feed types used per day (linked to DailyEntry)."""
+    __tablename__ = 'daily_feed_usage'
+    
+    id = Column(Integer, primary_key=True)
+    daily_entry_id = Column(Integer, ForeignKey('daily_entries.id'), nullable=False)
+    daily_entry = relationship("DailyEntry", backref="feed_usages")
+    feed_item_id = Column(Integer, ForeignKey('inventory_items.id'), nullable=False)
+    feed_item = relationship("InventoryItem")
+    quantity_kg = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.now)
 
 

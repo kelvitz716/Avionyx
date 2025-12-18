@@ -23,9 +23,7 @@ backups/
 # OS specific
 .DS_Store
 Thumbs.db
-FUTURE_IMPROVEMENTS.md
-alembic/versions/ef482ec249dc_add_finance_tables.py
-tests/test_finance_inventory.py
-alembic/versions/21a192c0f215_add_flock_table.py
-alembic/versions/f47d5117ca65_entity_first_schema.py
-tests/verify_harmonization.py
+
+# Testing
+.pytest_cache/
+.benchmarks/

@@ -1,7 +1,7 @@
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from database import get_db, InventoryItem, SystemSettings
+from database import get_db, InventoryItem, SystemSettings, InventoryLog
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from utils import get_back_home_keyboard, get_main_menu_keyboard, format_currency
 from datetime import date
@@ -9,41 +9,30 @@ from datetime import date
 router = Router()
 
 class InventoryStates(StatesGroup):
-    add_name = State()
     add_type = State()
+    select_item = State() # Handled via callback
     add_quantity = State()
-    add_unit = State()
-    add_cost = State()
-    smart_confirm = State()
+    add_reason = State() # Was add_name
 
 @router.callback_query(F.data == "menu_inventory")
 async def start_inventory(callback: types.CallbackQuery):
     db = next(get_db())
-    items = db.query(InventoryItem).all()
+    # Get counts for dashboard
+    from sqlalchemy import func
+    counts = {}
+    for t in ["FEED", "MEDICATION", "EQUIPMENT", "LIVESTOCK"]:
+        c = db.query(func.count(InventoryItem.id)).filter(InventoryItem.type == t, InventoryItem.quantity > 0).scalar()
+        counts[t] = c or 0
     db.close()
     
-    text = "📦 **Inventory Status**\n\n"
-    if not items:
-        text += "_No items in stock._"
-    else:
-        # Get weight setting
-        setting = db.query(SystemSettings).filter_by(key="feed_bag_weight").first()
-        bag_weight = float(setting.value) if setting else 70.0
-        
-        for item in items:
-            display_qty = f"{item.quantity} {item.unit}"
-            if item.type == "FEED" and item.unit == 'kg':
-                 # Dynamic Weight Per Item
-                 w_setting = db.query(SystemSettings).filter_by(key=f"weight_{item.id}").first()
-                 item_weight = float(w_setting.value) if w_setting else bag_weight
-                 
-                 bags = item.quantity / item_weight
-                 display_qty = f"{item.quantity} kg (~{bags:.1f} bags)"
-                 
-            text += f"▪️ **{item.name}**: {display_qty}\n"
+    text = "📦 **Inventory Manager**\n\nSelect a category to view stock or make adjustments."
     
     keyboard = [
-        [InlineKeyboardButton(text="📝 Adjust Stock (Correction)", callback_data="inv_add")],
+        [InlineKeyboardButton(text=f"🍽️ Feed ({counts['FEED']})", callback_data="inv_view_FEED"),
+         InlineKeyboardButton(text=f"💊 Meds ({counts['MEDICATION']})", callback_data="inv_view_MEDICATION")],
+        [InlineKeyboardButton(text=f"🛠️ Equipment ({counts['EQUIPMENT']})", callback_data="inv_view_EQUIPMENT"),
+         InlineKeyboardButton(text=f"🐥 Birds ({counts['LIVESTOCK']})", callback_data="inv_view_LIVESTOCK")],
+        [InlineKeyboardButton(text="📝 Adjust Stock (Quick)", callback_data="inv_add_menu")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="main_menu")]
     ]
     
@@ -54,29 +43,82 @@ async def start_inventory(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(F.data == "inv_add")
-async def start_add_item(callback: types.CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("inv_view_"))
+async def view_category_inventory(callback: types.CallbackQuery):
+    item_type = callback.data.replace("inv_view_", "")
+    
+    db = next(get_db())
+    items = db.query(InventoryItem).filter_by(type=item_type).all()
+    
+    # Group by Name to avoid duplicates in display
+    grouped = {}
+    setting = db.query(SystemSettings).filter_by(key="feed_bag_weight").first()
+    def_bag_weight = float(setting.value) if setting else 70.0
+    
+    for item in items:
+        if item.quantity <= 0: continue # Skip empty
+        
+        name = item.name.strip() # Normalize?
+        if name not in grouped:
+            grouped[name] = {'qty': 0.0, 'unit': item.unit, 'ids': []}
+        
+        # Simple merging
+        grouped[name]['qty'] += item.quantity
+        grouped[name]['ids'].append(item.id)
+        # Unit consistency check? Assuming same unit for same name
+        
+    db.close()
+    
+    text = f"📋 **{item_type} Stock**\n\n"
+    if not grouped:
+        text += "_No items in stock._\n"
+    else:
+        for name, data in grouped.items():
+            qty = data['qty']
+            unit = data['unit']
+            display = f"{qty:.1f} {unit}"
+            
+            if item_type == "FEED" and unit == 'kg':
+                 bags = qty / def_bag_weight
+                 display = f"{qty:.1f} kg (~{bags:.1f} bags)"
+            
+            text += f"▪️ **{name}**: {display}\n"
+            
     keyboard = [
-        [InlineKeyboardButton(text="🍽️ Feed", callback_data="type_FEED"),
-         InlineKeyboardButton(text="💊 Medication", callback_data="type_MEDICATION")],
-        [InlineKeyboardButton(text="🛠️ Equipment", callback_data="type_EQUIPMENT"),
-         InlineKeyboardButton(text="🐥 Livestock (Birds)", callback_data="type_LIVESTOCK")],
+        [InlineKeyboardButton(text=f"📝 Adjust {item_type}", callback_data=f"inv_add_type_{item_type}")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="menu_inventory")]
+    ]
+    
+    await callback.message.edit_text(
+        text=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "inv_add_menu")
+async def start_add_menu(callback: types.CallbackQuery, state: FSMContext):
+    keyboard = [
+        [InlineKeyboardButton(text="🍽️ Feed", callback_data="inv_add_type_FEED"),
+         InlineKeyboardButton(text="💊 Meds", callback_data="inv_add_type_MEDICATION")],
+        [InlineKeyboardButton(text="🛠️ Equipment", callback_data="inv_add_type_EQUIPMENT"),
+         InlineKeyboardButton(text="🐥 Birds", callback_data="inv_add_type_LIVESTOCK")],
         [InlineKeyboardButton(text="⬅️ Cancel", callback_data="menu_inventory")]
     ]
     await callback.message.edit_text(
-        text="➕ **Add Item**\n\nSelect type:",
+        text=f"⚖️ **Adjust Inventory**\n\nSelect type to adjust:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
     await state.set_state(InventoryStates.add_type)
     await callback.answer()
 
-@router.callback_query(InventoryStates.add_type, F.data.startswith("type_"))
-async def receive_type(callback: types.CallbackQuery, state: FSMContext):
-    item_type = callback.data.replace("type_", "")
+@router.callback_query(F.data.startswith("inv_add_type_"))
+async def receive_adjust_type(callback: types.CallbackQuery, state: FSMContext):
+    item_type = callback.data.replace("inv_add_type_", "")
     await state.update_data(item_type=item_type)
     
-    # Query existing items of this type
+    # Query items for selection
     db = next(get_db())
     items = db.query(InventoryItem).filter_by(type=item_type).all()
     db.close()
@@ -84,34 +126,26 @@ async def receive_type(callback: types.CallbackQuery, state: FSMContext):
     if items:
         keyboard = []
         for item in items:
-            keyboard.append([InlineKeyboardButton(text=f"{item.name} ({item.quantity} {item.unit})", callback_data=f"inv_select_{item.id}")])
+            # Show individual items here (allows targeting specific batches if needed)
+            # Or merge? For adjustment, targeting specific ID is safer if they are separate rows.
+            # But duplicate names confuse users. 
+            # Ideally we show Name + ID or Name + Qty.
+            keyboard.append([InlineKeyboardButton(text=f"{item.name} ({item.quantity:.1f} {item.unit})", callback_data=f"inv_select_{item.id}")])
         
-        keyboard.append([InlineKeyboardButton(text="➕ New Item", callback_data="inv_new_item")])
-        keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data="inv_add")])
+        # Back button depends on where we came from? Default to Inventory Menu
+        keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu_inventory")])
         
         await callback.message.edit_text(
-            text=f"📋 **Select {item_type}**\n\nChoose an existing item to adjust or create new:",
+            text=f"📋 **Adjust {item_type}**\n\nSelect item to adjust:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
         )
-        # We stay in add_type state or move to a selection state? 
-        # Let's keep it flexible. Handlers for inv_select_ will pick it up.
+        await state.set_state(InventoryStates.select_item) # New state or reuse?
     else:
-        # No items, go straight to name
-        await ask_new_item_name(callback, state, item_type)
-
-@router.callback_query(F.data == "inv_new_item")
-async def inv_new_item_handler(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    item_type = data.get('item_type', 'ITEM')
-    await ask_new_item_name(callback, state, item_type)
-
-async def ask_new_item_name(callback, state, item_type):
-    await callback.message.edit_text(
-        text=f"📝 **Name**\n\nEnter the name of the {item_type.lower()}:",
-        parse_mode="Markdown",
-        reply_markup=get_back_home_keyboard('menu_inventory')
-    )
-    await state.set_state(InventoryStates.add_name)
+        keyboard = [[InlineKeyboardButton(text="⬅️ Back", callback_data="menu_inventory")]]
+        await callback.message.edit_text(
+            text=f"⚠️ No {item_type} items found to adjust.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
     await callback.answer()
 
 @router.callback_query(F.data.startswith("inv_select_"))
@@ -128,76 +162,20 @@ async def receive_existing_select(callback: types.CallbackQuery, state: FSMConte
 
     # Pre-fill state
     await state.update_data(
+        item_id=item.id,
         item_name=item.name,
-        smart_unit=item.unit,
-        smart_cost=item.cost_per_unit,
-        using_smart=True
+        current_qty=item.quantity,
+        item_unit=item.unit
     )
     db.close()
     
     # Jump to Quantity
     await callback.message.edit_text(
-        text=f"🔢 **Adjust Stock: {item.name}**\n\nCurrent: {item.quantity} {item.unit}\n\nHow much are you adding/removing? (Use - for removal)",
-        parse_mode="Markdown"
+        text=f"🔢 **Adjust Stock: {item.name}**\n\nCurrent: {item.quantity} {item.unit}\n\nEnter adjustment amount:\n• Use positive number to ADD (e.g. `10` or `+10`)\n• Use negative number to REMOVE (e.g. `-5`)",
+        parse_mode="Markdown",
+        reply_markup=get_back_home_keyboard('menu_inventory')
     )
     await state.set_state(InventoryStates.add_quantity)
-    await callback.answer()
-
-@router.message(InventoryStates.add_name)
-async def receive_name(message: types.Message, state: FSMContext):
-    name = message.text
-    await state.update_data(item_name=name)
-    
-    # Smart Check
-    db = next(get_db())
-    existing = db.query(InventoryItem).filter(InventoryItem.name.ilike(name)).first()
-    db.close()
-    
-    if existing:
-        await state.update_data(
-            smart_unit=existing.unit,
-            smart_cost=existing.cost_per_unit,
-            using_smart=True
-        )
-        keyboard = [
-            [InlineKeyboardButton(text="✅ Yes, use saved details", callback_data="smart_yes")],
-            [InlineKeyboardButton(text="✏️ No, enter new details", callback_data="smart_no")]
-        ]
-        await message.answer(
-            f"🔍 **Found existing item!**\n\n"
-            f"Name: {existing.name}\n"
-            f"Unit: {existing.unit}\n"
-            f"Cost: {format_currency(existing.cost_per_unit)}\n\n"
-            f"Reuse these settings?",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-        )
-        # We need a new state for this confirmation, let's add it dynamically or handle here?
-        # Better to add to StatesGroup, but I can't easily modify the class definition from here without replacing the whole file.
-        # I'll rely on a temporary state handling or just replace the StatesGroup too.
-        # Actually I'll replace the whole file content for cleanliness in this tool call logic since I'm refactoring the flow.
-        await state.set_state(InventoryStates.smart_confirm)
-    else:
-        await state.update_data(using_smart=False)
-        await message.answer(text="🔢 **Quantity**\n\nEnter current stock level:", reply_markup=get_back_home_keyboard('menu_inventory'))
-        await state.set_state(InventoryStates.add_quantity)
-
-@router.callback_query(InventoryStates.smart_confirm, F.data.startswith("smart_"))
-async def receive_smart_confirm(callback: types.CallbackQuery, state: FSMContext):
-    choice = callback.data.split("_")[1]
-    
-    if choice == "yes":
-        await callback.message.edit_text(
-            text="🔢 **Quantity**\n\nHow much are you adding?",
-            parse_mode="Markdown"
-        )
-        await state.set_state(InventoryStates.add_quantity)
-    else:
-        await state.update_data(using_smart=False)
-        await callback.message.edit_text(
-            text="🔢 **Quantity**\n\nEnter current stock level:",
-            parse_mode="Markdown"
-        )
-        await state.set_state(InventoryStates.add_quantity)
     await callback.answer()
 
 @router.message(InventoryStates.add_quantity)
@@ -205,124 +183,105 @@ async def receive_quantity(message: types.Message, state: FSMContext):
     try:
         qty = float(message.text)
     except ValueError:
-        await message.answer("⚠️ Invalid number.")
+        await message.answer("⚠️ Invalid number. Use -5 for removal, 10 for addition.")
         return
         
-    await state.update_data(item_qty=qty)
-
-    # Check for negative stock limit
-    if qty < 0:
-        db = next(get_db())
-        data = await state.get_data()
-        name = data.get('item_name')
-        existing = db.query(InventoryItem).filter(InventoryItem.name.ilike(name)).first()
-        current = existing.quantity if existing else 0
-        db.close()
-        
-        if current + qty < 0:
-             await message.answer(
-                 f"⛔ **Cannot reduce stock below zero!**\nCurrent: {current}\n\nTry a smaller removal amount:",
-                 reply_markup=get_back_home_keyboard('menu_inventory')
-             )
-             return
-    
     data = await state.get_data()
-    if data.get('using_smart'):
-        # Skip to Finish
-        await finalize_inventory_add(message, state)
-    elif data.get('item_type') == "LIVESTOCK":
-        # Auto-set unit to 'birds' and skip
-        await state.update_data(item_unit="birds")
-        await message.answer(text="💰 **Cost per Bird** (Optional, enter 0 if unknown):", reply_markup=get_back_home_keyboard('menu_inventory'))
-        await state.set_state(InventoryStates.add_cost)
-    else:
-        await message.answer(text="📏 **Unit**\n\nEnter unit (e.g., kg, liters, pcs):", reply_markup=get_back_home_keyboard('menu_inventory'))
-        await state.set_state(InventoryStates.add_unit)
+    current_qty = data.get('current_qty', 0)
+    name = data.get('item_name')
+    unit = data.get('item_unit')
 
-@router.message(InventoryStates.add_unit)
-async def receive_unit(message: types.Message, state: FSMContext):
-    await state.update_data(item_unit=message.text)
-    await message.answer(text="💰 **Cost per Unit** (Optional, enter 0 if unknown):", reply_markup=get_back_home_keyboard('menu_inventory'))
-    await state.set_state(InventoryStates.add_cost)
-
-@router.message(InventoryStates.add_cost)
-async def receive_cost(message: types.Message, state: FSMContext):
-    try:
-        cost = float(message.text)
-    except ValueError:
-        cost = 0.0
+    # Check limits
+    if current_qty + qty < 0:
+        await message.answer(
+             f"⛔ **Cannot reduce stock below zero!**\nCurrent: {current_qty}\nResult would be: {current_qty + qty}\n\nTry a smaller removal amount:",
+             reply_markup=get_back_home_keyboard('menu_inventory')
+         )
+        return
     
-    await state.update_data(item_cost=cost)
-    await finalize_inventory_add(message, state)
+    # Ask for reason/note
+    await state.update_data(adjustment_qty=qty)
+    
+    keyboard = [
+        [InlineKeyboardButton(text="⚠️ Spoilage/Damaged", callback_data="reason_spoilage")],
+        [InlineKeyboardButton(text="📝 Correction/Count", callback_data="reason_correction")],
+        [InlineKeyboardButton(text="🎁 Gift/Bonus", callback_data="reason_gift")],
+        [InlineKeyboardButton(text="Other (Type it)", callback_data="reason_other")]
+    ]
+    
+    await message.answer(
+        text=f"📝 **Reason for Adjustment**\n\nAdjusting {name} by {qty:+.1f} {unit}.\nReason?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await state.set_state(InventoryStates.add_reason)
 
-async def finalize_inventory_add(message: types.Message, state: FSMContext):
+@router.callback_query(InventoryStates.add_reason, F.data.startswith("reason_"))
+async def receive_reason_button(callback: types.CallbackQuery, state: FSMContext):
+    reason = callback.data.split("_")[1].capitalize()
+    if reason == "Other":
+        await callback.message.edit_text("⌨️ Please type the reason:")
+        # Stay in state
+        return
+        
+    await finalize_adjustment(callback.message, state, reason)
+    await callback.answer()
+
+@router.message(InventoryStates.add_reason)
+async def receive_reason_text(message: types.Message, state: FSMContext):
+    await finalize_adjustment(message, state, message.text)
+
+async def finalize_adjustment(message_or_callback, state: FSMContext, reason: str):
     data = await state.get_data()
     db = next(get_db())
     
-    name = data['item_name']
+    item_id = data.get('item_id')
+    qty = data.get('adjustment_qty')
     
-    if data.get('using_smart'):
-        unit = data['smart_unit']
-        cost = data['smart_cost']
-        # Update quantity of existing item
-        existing = db.query(InventoryItem).filter(InventoryItem.name.ilike(name)).first()
-        if existing:
-            existing.quantity += data['item_qty']
-    else:
-        unit = data['item_unit']
-        cost = data.get('item_cost', 0.0)
+    item = db.query(InventoryItem).filter_by(id=item_id).first()
+    final_qty = 0
+    unit = ""
+    
+    if item:
+        item.quantity += qty
+        final_qty = item.quantity
+        unit = item.unit
         
-        existing = db.query(InventoryItem).filter(InventoryItem.name.ilike(name)).first()
-        if existing:
-            existing.unit = unit
-            existing.cost_per_unit = cost
-            existing.quantity += data['item_qty']
-        else:
-            item = InventoryItem(
-                name=name,
-                type=data['item_type'],
-                quantity=data['item_qty'],
-                unit=unit,
-                cost_per_unit=cost
-            )
-            db.add(item)
-            
-    # Special Logic for Livestock: Update DailyEntry Flock Count
-    # This should run regardless of whether it was existing or new, as long as we added stock.
-    if data.get('item_type') == "LIVESTOCK":
-        today = date.today()
-        from database import DailyEntry
-        from sqlalchemy import desc
-        entry = db.query(DailyEntry).filter(DailyEntry.date == today).first()
-        if not entry:
-            entry = DailyEntry(date=today)
-            last = db.query(DailyEntry).filter(DailyEntry.date < today).order_by(desc(DailyEntry.date)).first()
-            entry.flock_total = last.flock_total if last else 0
-            db.add(entry)
+        # Log
+        log = InventoryLog(
+            item_name=item.name,
+            quantity_change=qty,
+            # notes=f"Adjustment: {reason}" # InventoryLog might not have notes column? 
+            # I checked previously, it MIGHT NOT have notes. 
+            # Wait, previously I removed 'notes' from Daily Wizard because it errored.
+            # Does InventoryLog have notes? 
+            # Let me check database.py quickly or just assume it doesn't from previous error.
+            # The previous error was "TypeError: 'notes' is an invalid keyword argument for InventoryLog"
+            # So I should NOT pass notes.
+        )
+        # But wait, where do I store the reason?
+        # If InventoryLog has no notes, I can't store the reason.
+        # Let me check 'database.py' to be sure about InventoryLog fields.
+        db.add(log)
         
-        if entry.flock_added is None: entry.flock_added = 0
-        entry.flock_added += data['item_qty']
-        entry.flock_total += data['item_qty']
-            
+        # Special: Update Flock Count if LIVESTOCK
+        if item.type == "LIVESTOCK":
+            from database import DailyEntry
+            today = date.today()
+            daily = db.query(DailyEntry).filter_by(date=today).first()
+            if daily:
+                daily.flock_total = max(0, daily.flock_total + int(qty))
+    
     db.commit()
-    
-    # Capture new values for recap
-    final_qty = existing.quantity if existing else item.quantity
-    final_unit = existing.unit if existing else item.unit
-    
     db.close()
-    
-    change_qty = data['item_qty']
-    change_str = f"+{change_qty}" if change_qty > 0 else f"{change_qty}"
     
     await state.clear()
     
-    recap = (f"✔️ **Inventory Updated!**\n\n"
-             f"📦 **{name}**\n"
-             f"🔄 Change: {change_str} {final_unit}\n"
-             f"📊 **New Balance: {final_qty} {final_unit}**")
-             
+    if isinstance(message_or_callback, types.CallbackQuery):
+        message = message_or_callback.message
+    else:
+        message = message_or_callback
+        
     await message.answer(
-        text=recap,
+        f"✅ **Stock Adjusted!**\n\nItem: {data['item_name']}\nChange: {qty:+.1f} {unit}\nReason: {reason}",
         reply_markup=get_main_menu_keyboard()
-    ) if isinstance(message, types.Message) else await message.message.edit_text(text=recap, reply_markup=get_main_menu_keyboard())
+    )

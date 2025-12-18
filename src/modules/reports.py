@@ -1,26 +1,30 @@
 from aiogram import Router, types, F, Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 import csv
 import io
 from database import get_db, DailyEntry
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from utils import get_back_home_keyboard, format_currency
 
 router = Router()
 
+class ReportStates(StatesGroup):
+    export_range = State()
+
 @router.callback_query(F.data == "menu_reports")
 async def menu_reports(callback: types.CallbackQuery):
     keyboard = [
-        [InlineKeyboardButton(text="📅 Today's Summary", callback_data='report_daily')],
-        [InlineKeyboardButton(text="🗓️ Last 7 Days", callback_data='report_weekly')],
-        [InlineKeyboardButton(text="📆 Monthly Report", callback_data='report_month')],
-        [InlineKeyboardButton(text="📉 Profit & Loss", callback_data='report_pnl')],
-        [InlineKeyboardButton(text="📥 Export Data (CSV)", callback_data='report_export')],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data='main_menu')]
+        [InlineKeyboardButton(text="💰 Financial Report (P&L)", callback_data='report_pnl')],
+        [InlineKeyboardButton(text="🥚 Production & Performance", callback_data='report_prod')],
+        [InlineKeyboardButton(text="🏥 Health & Inventory Status", callback_data='report_status')],
+        [InlineKeyboardButton(text="📥 Export All Data (CSV)", callback_data='report_export')],
+        [InlineKeyboardButton(text="⬅️ Main Menu", callback_data='main_menu')]
     ]
     
     await callback.message.edit_text(
-        text="📊 **Reports & Insights**\n\nChoose a report:",
+        text="📊 **Business Intelligence**\n\nSelect a comprehensive report to view:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
@@ -157,68 +161,250 @@ async def show_monthly_report(callback: types.CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data == "report_export")
-async def export_data(callback: types.CallbackQuery, bot: Bot):
+async def show_export_options(callback: types.CallbackQuery, state: FSMContext):
+    """Show date range options for export."""
+    keyboard = [
+        [InlineKeyboardButton(text="📌 This Week", callback_data="export_week")],
+        [InlineKeyboardButton(text="📅 This Month", callback_data="export_month")],
+        [InlineKeyboardButton(text="📆 Last 30 Days", callback_data="export_30days")],
+        [InlineKeyboardButton(text="♾️ All Time", callback_data="export_all")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="menu_reports")]
+    ]
+    await callback.message.edit_text(
+        "📥 **Export Data**\n\nSelect date range:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await state.set_state(ReportStates.export_range)
+    await callback.answer()
+
+@router.callback_query(ReportStates.export_range, F.data.startswith("export_"))
+async def export_data(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    """Generate and send CSV export with selected date range."""
+    range_type = callback.data.split("_")[1]
     await callback.answer("⏳ Generating export...", show_alert=False)
     
+    # Calculate date range
+    today = date.today()
+    start_date = None
+    range_label = "All Time"
+    
+    if range_type == "week":
+        start_date = today - timedelta(days=7)
+        range_label = "Last 7 Days"
+    elif range_type == "month":
+        start_date = date(today.year, today.month, 1)
+        range_label = f"{today.strftime('%B %Y')}"
+    elif range_type == "30days":
+        start_date = today - timedelta(days=30)
+        range_label = "Last 30 Days"
+    # else: all time - no filter
+    
     db = next(get_db())
-    entries = db.query(DailyEntry).order_by(DailyEntry.date.desc()).all()
+    query = db.query(DailyEntry).order_by(DailyEntry.date.desc())
+    if start_date:
+        query = query.filter(DailyEntry.date >= start_date)
+    entries = query.all()
     db.close()
     
     if not entries:
-        await callback.message.answer("⚠️ No data available to export.")
+        await callback.message.edit_text(
+            f"⚠️ No data found for **{range_label}**.",
+            parse_mode="Markdown",
+            reply_markup=get_back_home_keyboard('menu_reports')
+        )
+        await state.clear()
         return
 
     # Generate CSV
     output = io.StringIO()
     writer = csv.writer(output)
-    
-    # Header
     writer.writerow(['Date', 'Eggs Collected', 'Eggs Broken', 'Feed Used (kg)', 'Feed Cost', 'Income', 'Mortality', 'Flock Total', 'Notes'])
     
-    # Data
     for e in entries:
         writer.writerow([
-            e.date,
-            e.eggs_collected,
-            e.eggs_broken,
-            e.feed_used_kg,
-            e.feed_cost,
-            e.income,
-            e.mortality_count,
-            e.flock_total,
-            e.notes or ""
+            e.date, e.eggs_collected, e.eggs_broken, e.feed_used_kg,
+            e.feed_cost, e.income, e.mortality_count, e.flock_total, e.notes or ""
         ])
         
     output.seek(0)
     csv_bytes = output.getvalue().encode('utf-8')
     
-    # Send document
-    file = BufferedInputFile(csv_bytes, filename=f"avionyx_export_{date.today()}.csv")
+    file = BufferedInputFile(csv_bytes, filename=f"avionyx_export_{range_type}_{date.today()}.csv")
     
     await bot.send_document(
         chat_id=callback.from_user.id,
         document=file,
-        caption=f"📊 **Avionyx Data Export**\n📅 Generated on: {date.today()}",
+        caption=f"📊 **Avionyx Data Export**\n📅 Range: {range_label}\n🗓️ Entries: {len(entries)}",
         parse_mode="Markdown"
     )
+    await state.clear()
 
 @router.callback_query(F.data == "report_pnl")
 async def show_pnl(callback: types.CallbackQuery):
-    from database import FinancialLedger # Import inside to avoid circular deps if any
+    from database import FinancialLedger
+    import sqlalchemy
     db = next(get_db())
     
-    ledgers = db.query(FinancialLedger).all()
-    income = sum(l.amount for l in ledgers if l.direction == "IN")
-    expense = sum(l.amount for l in ledgers if l.direction == "OUT")
-    net_profit = income - expense
+    # Get range: Defaulting to Current Month for start, with toggle for All Time?
+    # For "Comprehensive", let's show separate columns or just comprehensive totals.
+    # Let's show "Current Month" vs "All Time"
     
-    text = (f"📉 **P&L Statement**\n\n"
-            f"💰 **Total Income**: {format_currency(income)}\n"
-            f"💸 **Total Expenses**: {format_currency(expense)}\n"
-            f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"**Net Profit**: {format_currency(net_profit)}")
+    today = date.today()
+    start_month = date(today.year, today.month, 1)
+    
+    ledgers = db.query(FinancialLedger).all()
+    db.close()
+    
+    # Aggregation
+    data = {
+        'in_month': {'in': 0, 'out': 0, 'cats': {}},
+        'all_time': {'in': 0, 'out': 0, 'cats': {}}
+    }
+    
+    for l in ledgers:
+        amt = l.amount
+        cat = l.category or "Other"
+        
+        # All Time
+        if l.direction == "IN":
+            data['all_time']['in'] += amt
+        else:
+            data['all_time']['out'] += amt
+            data['all_time']['cats'][cat] = data['all_time']['cats'].get(cat, 0) + amt
+            
+        # Month
+        l_date = l.date.date() if isinstance(l.date, datetime) else l.date
+        if l_date >= start_month:
+            if l.direction == "IN":
+                data['in_month']['in'] += amt
+            else:
+                data['in_month']['out'] += amt
+                data['in_month']['cats'][cat] = data['in_month']['cats'].get(cat, 0) + amt
+                
+    # Build Text
+    def build_cat_list(cats):
+        if not cats: return "_No expenses_"
+        sorted_cats = sorted(cats.items(), key=lambda x: x[1], reverse=True)
+        return "\n".join([f"  • {c}: {format_currency(v)}" for c, v in sorted_cats])
+
+    text = f"📉 **Financial Performance**\n\n"
+    
+    # Month Section
+    m_income = data['in_month']['in']
+    m_expense = data['in_month']['out']
+    m_net = m_income - m_expense
+    m_margin = (m_net / m_income * 100) if m_income > 0 else 0
+    status_icon = "🟢" if m_net >= 0 else "🔴"
+    
+    text += f"📅 **Current Month ({today.strftime('%B')})**\n"
+    text += f"  💵 **Revenue:** `{format_currency(m_income)}`\n"
+    text += f"  💸 **Expenses:** `{format_currency(m_expense)}`\n"
+    text += f"  _Breakdown:_\n{build_cat_list(data['in_month']['cats'])}\n"
+    text += f"  ▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+    text += f"  {status_icon} **Net Profit: {format_currency(m_net)}**\n"
+    text += f"  📊 **Net Margin:** `{m_margin:.1f}%`\n\n"
+    
+    # All Time Section
+    a_income = data['all_time']['in']
+    a_net = a_income - data['all_time']['out']
+    a_margin = (a_net / a_income * 100) if a_income > 0 else 0
+    
+    text += f"♾️ **All Time Performance**\n"
+    text += f"  💵 Revenue: `{format_currency(a_income)}`\n"
+    text += f"  💰 Net Profit: `{format_currency(a_net)}` ({a_margin:.1f}%)"
+    
+    keyboard = [[InlineKeyboardButton(text="⬅️ Back", callback_data="menu_reports")]]
+    await callback.message.edit_text(text=text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    await callback.answer()
+
+@router.callback_query(F.data == "report_prod")
+async def show_production(callback: types.CallbackQuery):
+    db = next(get_db())
+    # Last 30 days
+    today = date.today()
+    start = today - timedelta(days=30)
+    
+    entries = db.query(DailyEntry).filter(DailyEntry.date >= start).order_by(DailyEntry.date).all()
+    
+    total_eggs = sum(e.eggs_collected for e in entries)
+    total_broken = sum(e.eggs_broken for e in entries)
+    total_feed = sum(e.feed_used_kg for e in entries)
+    
+    # Calculate Laying Rate (Avg Eggs / Avg Flock Size)
+    avg_flock = sum(e.flock_total for e in entries) / len(entries) if entries else 0
+    laying_rate = 0
+    if avg_flock > 0 and entries:
+        laying_rate = (total_eggs / len(entries)) / avg_flock * 100
+        
+    mortality = sum(e.mortality_count for e in entries)
+    
+    from database import Flock
+    flocks = db.query(Flock).filter_by(status='ACTIVE').all()
+    flock_text = "\n".join([f"• {f.name}: {f.current_count} birds" for f in flocks])
     
     db.close()
+    
+    # Feed Efficiency (Grams per Egg)
+    feed_per_egg = (total_feed * 1000) / total_eggs if total_eggs else 0
+    eff_icon = "🟢" if feed_per_egg < 160 else "🟠" # 140-160g is decent for layers
+    if feed_per_egg > 200: eff_icon = "🔴"
+    
+    text = f"🥚 **Production Insights (Last 30 Days)**\n\n"
+    text += f"📊 **Efficiency Metrics**\n"
+    text += f"  • Laying Rate: `{laying_rate:.1f}%`\n"
+    text += f"  • Feed Efficiency: `{feed_per_egg:.0f}g / egg` {eff_icon}\n"
+    text += f"  • Broken Eggs: `{((total_broken/total_eggs)*100 if total_eggs else 0):.1f}%`\n\n"
+    text += f"📉 **Resource Usage**\n"
+    text += f"  • Total Feed: `{total_feed:.1f} kg`\n"
+    text += f"  • Mortality: `{mortality} birds`\n\n"
+    
+    text += f"🐣 **Active Flocks**\n{flock_text}" if flock_text else "🐣 **Active Flocks**\n_No active flocks_"
+    
+    keyboard = [[InlineKeyboardButton(text="⬅️ Back", callback_data="menu_reports")]]
+    await callback.message.edit_text(text=text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    await callback.answer()
+
+@router.callback_query(F.data == "report_status")
+async def show_status(callback: types.CallbackQuery):
+    db = next(get_db())
+    from database import InventoryItem, VaccinationRecord
+    
+    # Stock
+    feed = db.query(InventoryItem).filter(InventoryItem.type == "FEED", InventoryItem.quantity > 0).all()
+    meds = db.query(InventoryItem).filter(InventoryItem.type == "MEDICATION", InventoryItem.quantity > 0).all()
+    
+    # Calculate Burn Rate (Last 7 Days)
+    today = date.today()
+    start_7 = today - timedelta(days=7)
+    entries_7 = db.query(DailyEntry).filter(DailyEntry.date >= start_7).all()
+    avg_daily_feed = sum(e.feed_used_kg for e in entries_7) / 7 if entries_7 else 0
+    
+    # Health
+    # Get last vaccination per flock?
+    # Just list recent vaccinations
+    recent_vacs = db.query(VaccinationRecord).order_by(VaccinationRecord.date.desc()).limit(5).all()
+    
+    db.close()
+    
+    text = "🏥 **Health & Inventory Status**\n\n"
+    
+    text += f"🍽️ **Feed Stock** (Avg usage: {avg_daily_feed:.1f} kg/day)\n"
+    if not feed: text += "  _Low stock_\n"
+    for f in feed:
+         est_days = f.quantity / avg_daily_feed if avg_daily_feed > 0 else 99
+         alert = "⚠️" if est_days < 3 else ""
+         text += f"  • {f.name}: `{f.quantity} {f.unit}` (~{est_days:.1f} days) {alert}\n"
+         
+    text += "\n💊 **Medication Stock**\n"
+    if not meds: text += "_None_\n"
+    for m in meds:
+         text += f"• {m.name}: {m.quantity} {m.unit}\n"
+         
+    text += "\n💉 **Recent Vaccinations**\n"
+    if not recent_vacs: text += "_No records_\n"
+    for v in recent_vacs:
+         text += f"• {v.date}: {v.vaccine_name} ({v.birds_vaccinated} birds)\n"
     
     keyboard = [[InlineKeyboardButton(text="⬅️ Back", callback_data="menu_reports")]]
     await callback.message.edit_text(text=text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))

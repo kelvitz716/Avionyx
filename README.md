@@ -1,4 +1,4 @@
-# Avionyx - Poultry Farm Management Bot
+# Avionyx - Poultry Farm Management Bot (v3.0)
 
 A Telegram bot for managing poultry farm operations including egg collection, feed tracking, flock management, and reporting.
 
@@ -7,10 +7,19 @@ A Telegram bot for managing poultry farm operations including egg collection, fe
 - 🥚 **Egg Collection** - Track daily egg production with breakage logging
 - 🍽️ **Feed Management** - Record feed usage with cost calculations
 - 🐥 **Flock Tracking** - Monitor flock additions, removals, and mortality
-- 💰 **Sales Recording** - Track egg sales and income
-- 📊 **Reports** - Daily, weekly, and monthly summaries
+- 💰 **Sales Recording** - Track egg sales and income (**New:** Customer Management)
+- 📊 **"Nano Banana" Reports** - High-fidelity Financials, Production Efficiency (FCR), and Inventory Forecasts
+- 💉 **Health Module** - Vaccination tracking (Birds Treated vs Stock Used)
+- 🤝 **Trust Score** - Monitor and adjust contact trust ratings with notes
+- 👥 **Multi-User Roles** - Role-based menu filtering (Admin/Manager/Staff)
 - 🔔 **Alerts** - Low stock and production anomaly detection
 - 📜 **Audit Logs** - Track all user actions
+
+
+## Version 3.0 "Nano Banana" Highlights
+- **Smart Reports**: Real-time margins, feed efficiency (g/egg), and burn rate estimates.
+- **Enhanced Data**: Validated inputs, unique flock names, and precise stock tracking.
+- **Improved UX**: New workflows for customer creation and bulk vaccination recording.
 
 ## Quick Start
 

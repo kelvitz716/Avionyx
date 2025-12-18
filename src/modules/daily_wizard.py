@@ -2,7 +2,7 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from database import get_db, DailyEntry, SystemSettings, InventoryItem, InventoryLog, AuditLog
+from database import get_db, DailyEntry, SystemSettings, InventoryItem, InventoryLog, AuditLog, DailyFeedUsage
 from datetime import date, datetime
 from utils import get_back_home_keyboard, get_main_menu_keyboard, format_currency
 from sqlalchemy import desc
@@ -12,9 +12,13 @@ router = Router()
 class DailyWizardStates(StatesGroup):
     eggs_collected = State()
     eggs_broken = State()
+    feed_mode = State()       # single/multiple
     feed_select = State()
     feed_amount = State()
     feed_unit = State()
+    multi_feed_select = State()   # for adding multiple feeds
+    multi_feed_amount = State()
+    multi_feed_add_more = State() # prompt to add another feed
     mortality_check = State()
     mortality_count = State()
     mortality_reason = State()
@@ -64,75 +68,57 @@ async def receive_broken(message: types.Message, state: FSMContext):
         return
         
     await state.update_data(eggs_broken=int(message.text))
-    await show_feed_select_menu(message, state) # Move to Feed
-    
-    # Get weight setting
-    db = next(get_db())
-    setting = db.query(SystemSettings).filter_by(key="feed_bag_weight").first()
-    bag_weight = float(setting.value) if setting else 70.0
-    db.close()
-    
-    keyboard = []
-    if feed_items:
-        for item in feed_items:
-            # Dual Unit Display
-            display_text = f"{item.name} ({item.quantity} {item.unit})"
-            if item.type == 'FEED':
-                # Get specific weight
-                db = next(get_db()) # Re-open db session for this query
-                w_setting = db.query(SystemSettings).filter_by(key=f"weight_{item.id}").first()
-                db.close() # Close db session
-                i_weight = float(w_setting.value) if w_setting else bag_weight
-                
-                if item.unit == 'kg':
-                    bags = item.quantity / i_weight
-                    display_text = f"{item.name} ({item.quantity} kg / ~{bags:.1f} bags)"
-            
-            keyboard.append([InlineKeyboardButton(text=display_text, callback_data=f"feedwizard_{item.id}")])
-    
-    keyboard.append([InlineKeyboardButton(text="Skip Feed / Generic", callback_data="feedwizard_none")])
-    keyboard.append([InlineKeyboardButton(text="⬅️ Back (Eggs)", callback_data="menu_daily_wizard")])
+    await show_feed_mode_menu(message, state)
 
-    await message.answer(
-        text="Step 2/3: **Feed** 🍽️\n\nWhat feed did you use today?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-    )
-    await state.set_state(DailyWizardStates.feed_select)
 
-@router.callback_query(DailyWizardStates.feed_select, F.data.startswith("feedwizard_"))
-async def receive_feed_select(callback: types.CallbackQuery, state: FSMContext):
-    choice = callback.data.split("_")[1]
-    
-    if choice == "skip":
-        await state.update_data(feed_skipped=True)
-        await start_mortality_step(callback.message, state) # Helper
-    else:
-        item_id = int(choice) if choice != "none" else None
-        await state.update_data(feed_item_id=item_id, feed_skipped=False)
-        
-        # Add Back Button
-        keyboard = [[InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_feed_select")]]
-        
-        await callback.message.edit_text(
-            text="🍽️ **Feed Amount**\n\nHow much (kg/bags)?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-        )
-        await state.set_state(DailyWizardStates.feed_amount)
-    await callback.answer()
 
-# Also need to handle "back_to_feed_select" - implemented below or relies on state transition?
-# Best to redirect to receive_broken (which shows feed select)? No, that's not easily callable as handler.
-# I will create a dedicated `show_feed_select(message, state)` function to be reusable.
 
 @router.callback_query(F.data == "back_to_feed_select")
 async def back_to_feed_select(callback: types.CallbackQuery, state: FSMContext):
-     # Re-trigger logic from receive_broken
-     # Copy-paste logic or refactor? Refactor is cleaner.
-     await show_feed_select_menu(callback.message, state)
+     await show_feed_mode_menu(callback.message, state)
      await callback.answer()
 
-async def show_feed_select_menu(message_or_callback, state):
+
+async def show_feed_mode_menu(message_or_callback, state: FSMContext):
+    """Ask if using single or multiple feeds today."""
+    keyboard = [
+        [InlineKeyboardButton(text="🍽️ Single Feed Type", callback_data="dailyfeed_single")],
+        [InlineKeyboardButton(text="🍽️🍽️ Multiple Feed Types", callback_data="dailyfeed_multi")],
+        [InlineKeyboardButton(text="⏩ Skip Feed", callback_data="dailyfeed_skip")],
+        [InlineKeyboardButton(text="⬅️ Back (Eggs)", callback_data="wizard_edit_eggs")],
+        [InlineKeyboardButton(text="🏠 Home", callback_data="main_menu")]
+    ]
+    
+    text = "Step 2/3: **Feed** 🍽️\n\nAre you using one type of feed or multiple types today?"
+    
+    if isinstance(message_or_callback, types.CallbackQuery):
+        await message_or_callback.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    else:
+        await message_or_callback.answer(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    
+    await state.set_state(DailyWizardStates.feed_mode)
+
+
+@router.callback_query(DailyWizardStates.feed_mode, F.data.startswith("dailyfeed_"))
+async def receive_feed_mode(callback: types.CallbackQuery, state: FSMContext):
+    mode = callback.data.split("_")[1]
+    
+    if mode == "skip":
+        await state.update_data(feed_skipped=True, daily_feeds=[])
+        await start_mortality_step(callback.message, state)
+    else:
+        await state.update_data(
+            feed_mode=mode,
+            daily_feeds=[],  # List to accumulate feed usages
+            feed_skipped=False
+        )
+        await show_feed_select_menu(callback.message, state)
+    
+    await callback.answer()
+
+
+async def show_feed_select_menu(message_or_callback, state: FSMContext):
+    """Show available feeds to select from."""
     db = next(get_db())
     feed_items = db.query(InventoryItem).filter(InventoryItem.type == "FEED", InventoryItem.quantity > 0).all()
     db.close()
@@ -140,93 +126,150 @@ async def show_feed_select_menu(message_or_callback, state):
     keyboard = []
     if feed_items:
         for item in feed_items:
-            keyboard.append([InlineKeyboardButton(text=f"{item.name} ({item.quantity} {item.unit})", callback_data=f"feedwizard_{item.id}")])
-    
-    keyboard.append([InlineKeyboardButton(text="Skip Feed / Generic", callback_data="feedwizard_none")])
-    keyboard.append([InlineKeyboardButton(text="⬅️ Back (Eggs)", callback_data="wizard_edit_eggs")]) # Or menu_daily_wizard...
-    # Wait, back from Feed Select goes to... Eggs Broken? Or just restart wizard if linear?
-    # User can go back to Eggs Broken... but `receive_broken` needs input.
-    # Simpler: Back goes to "menu_daily_wizard" (Restart) or I implement full step back.
-    # Let's say Back goes to Edit Eggs step (which is basically restart for Step 1).
-    
-    text = "Step 2/3: **Feed** 🍽️\n\nWhat feed did you use today?"
-    if isinstance(message_or_callback, types.CallbackQuery):
-        await message_or_callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+            # Show available quantity
+            display = f"{item.name} ({item.quantity:.1f} {item.unit})"
+            keyboard.append([InlineKeyboardButton(text=display, callback_data=f"feedwizard_{item.id}")])
     else:
-        await message_or_callback.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        keyboard.append([InlineKeyboardButton(text="⚠️ No feed in stock", callback_data="feedwizard_none")])
+    
+    keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_feed_mode")])
+    keyboard.append([InlineKeyboardButton(text="🏠 Home", callback_data="main_menu")])
+    
+    text = "🍽️ **Select Feed**\n\nWhich feed did you use?"
+    if isinstance(message_or_callback, types.CallbackQuery):
+        await message_or_callback.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    else:
+        await message_or_callback.answer(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
     
     await state.set_state(DailyWizardStates.feed_select)
+
+
+@router.callback_query(F.data == "back_to_feed_mode")
+async def back_to_feed_mode(callback: types.CallbackQuery, state: FSMContext):
+    await show_feed_mode_menu(callback.message, state)
+    await callback.answer()
+
+
+@router.callback_query(DailyWizardStates.feed_select, F.data.startswith("feedwizard_"))
+async def receive_feed_select(callback: types.CallbackQuery, state: FSMContext):
+    choice = callback.data.split("_")[1]
+    
+    if choice == "none":
+        await state.update_data(feed_skipped=True)
+        await start_mortality_step(callback.message, state)
+    else:
+        item_id = int(choice)
+        db = next(get_db())
+        item = db.query(InventoryItem).filter_by(id=item_id).first()
+        
+        if item:
+            await state.update_data(
+                current_feed_id=item.id,
+                current_feed_name=item.name,
+                current_feed_unit=item.unit,
+                current_feed_stock=item.quantity
+            )
+        db.close()
+        
+        await callback.message.edit_text(
+            text=f"🍽️ **{item.name}**\n\nStock: {item.quantity:.1f} {item.unit}\n\nHow much did you use (in kg)?",
+            parse_mode="Markdown",
+            reply_markup=get_back_home_keyboard("back_to_feed_select")
+        )
+        await state.set_state(DailyWizardStates.feed_amount)
+    
+    await callback.answer()
+
+
 
 @router.message(DailyWizardStates.feed_amount)
 async def receive_feed_amount(message: types.Message, state: FSMContext):
     try:
         qty = float(message.text)
+        if qty <= 0:
+            raise ValueError
     except:
-        await message.answer("⚠️ Invalid number.")
+        await message.answer("⚠️ Please enter a valid positive number.")
         return
-        
-    await state.update_data(feed_amount=qty)
     
-    # Unit
-    keyboard = [
-        [InlineKeyboardButton(text="⚖️ Kilograms (kg)", callback_data='unit_kg')],
-        [InlineKeyboardButton(text="🎒 Bags", callback_data='unit_bag')],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data='back_to_feed_select')]
-    ]
-    await message.answer("Unit?", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await state.set_state(DailyWizardStates.feed_unit)
-
-@router.callback_query(DailyWizardStates.feed_unit, F.data.startswith("unit_"))
-async def receive_feed_unit(callback: types.CallbackQuery, state: FSMContext):
-    unit = callback.data
-    await state.update_data(feed_unit=unit)
-    
-    # Check Stock Availability
     data = await state.get_data()
-    item_id = data.get('feed_item_id')
-    amount = data.get('feed_amount')
+    current_stock = data.get('current_feed_stock', 0)
+    feed_name = data.get('current_feed_name', 'Feed')
     
-    if item_id:
-        db = next(get_db())
-        item = db.query(InventoryItem).filter_by(id=item_id).first()
+    # Check stock availability
+    if qty > current_stock:
+        await message.answer(
+            f"⛔ **Not Enough {feed_name}!**\n\n"
+            f"Stock: {current_stock:.1f} kg\n"
+            f"Trying to use: {qty} kg\n\n"
+            f"Please enter a lower amount:",
+            parse_mode="Markdown",
+            reply_markup=get_back_home_keyboard("back_to_feed_select")
+        )
+        return
+    
+    # Add this feed to the daily_feeds list
+    feed_id = data.get('current_feed_id')
+    daily_feeds = data.get('daily_feeds', [])
+    
+    daily_feeds.append({
+        'id': feed_id,
+        'name': feed_name,
+        'quantity_kg': qty
+    })
+    
+    await state.update_data(
+        daily_feeds=daily_feeds,
+        current_feed_id=None,
+        current_feed_name=None,
+        current_feed_stock=None
+    )
+    
+    # Check if multi-feed mode
+    feed_mode = data.get('feed_mode', 'single')
+    
+    if feed_mode == 'multi':
+        # Ask if they want to add another feed
+        keyboard = [
+            [InlineKeyboardButton(text="➕ Add Another Feed", callback_data="multifeed_add")],
+            [InlineKeyboardButton(text="✅ Done with Feed", callback_data="multifeed_done")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_feed_select")],
+            [InlineKeyboardButton(text="🏠 Home", callback_data="main_menu")]
+        ]
         
-        # Get weight
-        w_setting = db.query(SystemSettings).filter_by(key=f"weight_{item_id}").first()
-        g_setting = db.query(SystemSettings).filter_by(key="feed_bag_weight").first()
-        bag_weight = float(w_setting.value) if w_setting else (float(g_setting.value) if g_setting else 70.0)
+        # Show summary so far
+        summary_lines = ["🍽️ **Feed Usage Today**\n"]
+        total_kg = 0
+        for f in daily_feeds:
+            summary_lines.append(f"• {f['name']}: {f['quantity_kg']}kg")
+            total_kg += f['quantity_kg']
+        summary_lines.append(f"\n**Total: {total_kg}kg**")
         
-        db.close()
-        
-        if item:
-            qty_needed_kg = amount
-            if unit == 'unit_bag':
-                qty_needed_kg = amount * bag_weight
-            elif item.unit == 'bags': # Inventory is bags, user entered KG? Complexity. 
-                # Assumption: Inventory is usually KG for feed.
-                pass
-                
-            # Compare in KG (assuming item.unit is kg for FEED)
-            current_kg = item.quantity
-            
-            if qty_needed_kg > current_kg:
-                 msg = f"⚠️ **Low Stock Warning**\n\nYou have {current_kg} kg.\nYou are trying to use {qty_needed_kg} kg."
-                 # For wizard, we might not want to BLOCK, but warn?
-                 # User 'Module Refinement' objective said "prevent negative physical inventory".
-                 # So we MUST BLOCK.
-                 
-                 await callback.message.edit_text(
-                     f"⛔ **Not Enough Feed!**\n\nStock: {current_kg} kg\nTrying to use: {qty_needed_kg} kg\n\nPlease enter a lower amount:",
-                     reply_markup=get_back_home_keyboard("wizard_edit_feed") # Back goes to feed select to retry
-                 )
-                 # We need to set state back to feed_amount to retry? 
-                 # Or back to feed select?
-                 # Let's send them to feed_amount to retry number
-                 await state.set_state(DailyWizardStates.feed_amount)
-                 await callback.answer()
-                 return
+        await message.answer(
+            text="\n".join(summary_lines) + "\n\nAdd more feed types?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+        await state.set_state(DailyWizardStates.multi_feed_add_more)
+    else:
+        # Single feed mode - proceed to mortality
+        await start_mortality_step(message, state)
 
-    await start_mortality_step(callback.message, state)
+
+@router.callback_query(DailyWizardStates.multi_feed_add_more, F.data.startswith("multifeed_"))
+async def receive_multi_feed_choice(callback: types.CallbackQuery, state: FSMContext):
+    choice = callback.data.split("_")[1]
+    
+    if choice == "add":
+        # Show feed selection again
+        await show_feed_select_menu(callback.message, state)
+    else:
+        # Done - proceed to mortality
+        await start_mortality_step(callback.message, state)
+    
     await callback.answer()
+
+
 
 async def start_mortality_step(message: types.Message, state: FSMContext):
     keyboard = [
@@ -302,16 +345,29 @@ async def wizard_edit_mortality(callback: types.CallbackQuery, state: FSMContext
 async def show_summary(message: types.Message, state: FSMContext):
     data = await state.get_data()
     
-    # Feed Details Str
+    # Feed Details Str - now supports multi-feed
     feed_str = "Skipped"
     if not data.get('feed_skipped'):
-        feed_str = f"{data.get('feed_amount')} {data.get('feed_unit').replace('unit_', '')}"
+        daily_feeds = data.get('daily_feeds', [])
+        if daily_feeds:
+            feed_parts = []
+            total_kg = 0
+            for f in daily_feeds:
+                feed_parts.append(f"{f['name']}: {f['quantity_kg']}kg")
+                total_kg += f['quantity_kg']
+            feed_str = ", ".join(feed_parts) if len(feed_parts) <= 2 else f"{len(feed_parts)} types, {total_kg}kg total"
+        elif data.get('feed_amount'):
+            # Legacy fallback
+            unit = data.get('feed_unit', 'kg')
+            if unit:
+                unit = unit.replace('unit_', '')
+            feed_str = f"{data.get('feed_amount')} {unit}"
         
     text = (
         "📊 **Daily Summary**\n\n"
-        f"🥚 Eggs: {data.get('eggs_collected')} (Broken: {data.get('eggs_broken')})\n"
+        f"🥚 Eggs: {data.get('eggs_collected', 0)} (Broken: {data.get('eggs_broken', 0)})\n"
         f"🍽️ Feed: {feed_str}\n"
-        f"⚰️ Mortality: {data.get('mortality_count')}\n\n"
+        f"⚰️ Mortality: {data.get('mortality_count', 0)}\n\n"
         "Save this record?"
     )
     
@@ -376,7 +432,7 @@ async def save_wizard(callback: types.CallbackQuery, state: FSMContext):
         
         if good > 0:
             egg_item.quantity += good
-            db.add(InventoryLog(item_name="Eggs", quantity_change=good, notes="Daily Collection"))
+            db.add(InventoryLog(item_name="Eggs", quantity_change=good))
     
     # Mortality
     m_count = data.get('mortality_count', 0)
@@ -392,44 +448,63 @@ async def save_wizard(callback: types.CallbackQuery, state: FSMContext):
         reason = data.get('mortality_reason', 'unknown')
         entry.mortality_reasons = f"{entry.mortality_reasons}, {reason} ({m_count})" if entry.mortality_reasons else f"{reason} ({m_count})"
         
-    # Feed
-    if not data.get('feed_skipped'):
+    # Feed - Now supports multiple feeds
+    daily_feeds = data.get('daily_feeds', [])
+    if not data.get('feed_skipped') and daily_feeds:
+        total_kg = 0.0
+        total_cost = 0.0
+        
+        # Ensure entry is flushed to get ID for foreign key
+        db.flush()
+        
+        for feed_data in daily_feeds:
+            feed_id = feed_data.get('id')
+            qty_kg = feed_data.get('quantity_kg', 0)
+            feed_name = feed_data.get('name', 'Unknown Feed')
+            
+            # Get the inventory item
+            item = None
+            if feed_id:
+                item = db.query(InventoryItem).filter_by(id=feed_id).first()
+            
+            # Calculate cost
+            cost = 0.0
+            if item and item.cost_per_unit:
+                cost = qty_kg * item.cost_per_unit
+            
+            total_kg += qty_kg
+            total_cost += cost
+            
+            # Deduct from inventory
+            if item:
+                item.quantity -= qty_kg
+                db.add(InventoryLog(item_name=item.name, quantity_change=-qty_kg))
+            
+            # Create DailyFeedUsage record
+            if feed_id:
+                usage = DailyFeedUsage(
+                    daily_entry_id=entry.id,
+                    feed_item_id=feed_id,
+                    quantity_kg=qty_kg
+                )
+                db.add(usage)
+        
+        entry.feed_used_kg += total_kg
+        entry.feed_cost += total_cost
+    
+    # Legacy support for single feed flow (if daily_feeds is empty but old data exists)
+    elif not data.get('feed_skipped') and data.get('feed_amount'):
         amount = data.get('feed_amount', 0.0)
-        unit = data.get('feed_unit')
-        item_id = data.get('feed_item_id')
+        item_id = data.get('current_feed_id')
         
-        # Calculate Cost & KG
-        setting = db.query(SystemSettings).filter_by(key="feed_bag_weight").first()
-        bag_weight = float(setting.value) if setting else 70.0
-        
-        DEFAULT_BAG_WEIGHT = bag_weight
-        DEFAULT_BAG_COST = 2500.0 # Could make this config too, but cost is usually per purchase/item
-        
-        kg_used = amount
-        cost = 0.0
-        
-        item = None
         if item_id:
             item = db.query(InventoryItem).filter_by(id=item_id).first()
-            
-        if unit == 'unit_kg':
-            kg_used = amount
-            if item and item.cost_per_unit:
-                cost = amount * item.cost_per_unit 
-        else: # Bags
-            kg_used = amount * DEFAULT_BAG_WEIGHT 
             if item:
-                cost = amount * item.cost_per_unit
-            else:
-                cost = amount * DEFAULT_BAG_COST
-                
-        entry.feed_used_kg += kg_used
-        entry.feed_cost += cost
-        
-        # Deduct Inventory
-        if item:
-             item.quantity -= amount 
-             db.add(InventoryLog(item_name=item.name, quantity_change=-amount, notes="Daily Feeding"))
+                cost = amount * (item.cost_per_unit or 0)
+                entry.feed_used_kg += amount
+                entry.feed_cost += cost
+                item.quantity -= amount
+                db.add(InventoryLog(item_name=item.name, quantity_change=-amount))
     
     # Audit
     db.add(AuditLog(user_id=callback.from_user.id, action="daily_wizard", details="Completed Daily Update"))
