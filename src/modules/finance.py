@@ -2,8 +2,9 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from database import get_db, FinancialLedger, Contact, InventoryLog
+from database import get_db, FinancialLedger, Contact, InventoryLog, SystemSettings, InventoryItem, DailyEntry
 from datetime import date
+from sqlalchemy import desc
 from utils import get_back_home_keyboard, get_main_menu_keyboard, format_currency
 
 router = Router()
@@ -20,7 +21,14 @@ class ExpenseStates(StatesGroup):
     select_inv_item = State()
     new_inv_name = State()
     new_inv_unit = State()
+    new_inv_unit = State()
     inv_quantity = State()
+    
+    # Sales States
+    sale_customer = State()
+    sale_mode = State()
+    sale_quantity = State()
+    sale_price = State()
 
 EXPENSE_CATEGORIES = {
     'cat_feed': '🍽️ Feed',
@@ -31,6 +39,21 @@ EXPENSE_CATEGORIES = {
 
 @router.callback_query(F.data == "menu_finance")
 async def start_finance(callback: types.CallbackQuery, state: FSMContext):
+    keyboard = [
+        [InlineKeyboardButton(text="📉 Record Expense", callback_data="fin_expense_start")],
+        [InlineKeyboardButton(text="📈 Record Income (Sales)", callback_data="fin_income_start")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="main_menu")]
+    ]
+
+    await callback.message.edit_text(
+        text="💰 **Finance Management**\n\nChoose functionality:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "fin_expense_start")
+async def start_expense(callback: types.CallbackQuery, state: FSMContext):
     keyboard = []
     row = []
     for key, label in EXPENSE_CATEGORIES.items():
@@ -41,14 +64,35 @@ async def start_finance(callback: types.CallbackQuery, state: FSMContext):
     if row:
         keyboard.append(row)
     
-    # Removed P&L from here (moved to Reports)
-    keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data="main_menu")])
+    keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu_finance")])
 
     await callback.message.edit_text(
-        text="💰 **Finance Management**\n\nSelect an Expense Category:",
+        text="📉 **Record Expense**\n\nSelect Category:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
+    await callback.answer()
+
+@router.callback_query(F.data == "fin_income_start")
+async def start_income(callback: types.CallbackQuery, state: FSMContext):
+    # Select Customer
+    db = next(get_db())
+    customers = db.query(Contact).filter_by(role="CUSTOMER").all()
+    db.close()
+    
+    keyboard = []
+    for c in customers:
+        keyboard.append([InlineKeyboardButton(text=f"👤 {c.name}", callback_data=f"cust_{c.id}")])
+    
+    keyboard.append([InlineKeyboardButton(text="🚶 Walk-in / Generic", callback_data="cust_generic")])
+    keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu_finance")])
+    
+    await callback.message.edit_text(
+        text="📈 **Record Income**\n\nSelect Customer:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await state.set_state(ExpenseStates.sale_customer)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("cat_"))
@@ -119,13 +163,8 @@ async def receive_inv_link(callback: types.CallbackQuery, state: FSMContext):
     
     if choice == "yes":
          # Select Item from Inventory
+        # Select Item from Inventory
         db = next(get_db())
-        items = db.query(FinancialLedger).session.query(InventoryItem).all() # Hacky access or just import InventoryItem?
-        # Need to import InventoryItem in finance.py
-        # Assuming import exists or will be added
-        # items = db.query(InventoryItem).all()
-        # To avoid import errors let's use the object from database.py if imported
-        from database import InventoryItem
         items = db.query(InventoryItem).all()
         db.close()
         
@@ -164,15 +203,39 @@ async def receive_inv_item(callback: types.CallbackQuery, state: FSMContext):
         item = db.query(InventoryItem).filter_by(id=int(item_id)).first()
         name = item.name if item else "Unknown"
         unit = item.unit if item else "units"
+        inv_type = item.type if item else "SUPPLY"
         db.close()
         
-        await state.update_data(item_details=name, inv_item_unit=unit) # Auto-fill expense details with item name
+        await state.update_data(item_details=name, inv_item_unit=unit, inv_item_type=inv_type) 
         
-        await callback.message.edit_text(
-            text=f"🔢 **Quantity**\n\nHow many **{unit}** are you buying?",
-            parse_mode="Markdown"
-        )
-        await state.set_state(ExpenseStates.inv_quantity)
+        # If FEED and unit is KG, ask if buying in Bags
+        keyboard = []
+        if inv_type == "FEED" and unit == "kg":
+             keyboard = [
+                [InlineKeyboardButton(text="🎒 Bags (70kg)", callback_data="uom_bags")],
+                [InlineKeyboardButton(text="⚖️ KGs", callback_data="uom_kgs")]
+             ]
+             await callback.message.edit_text(
+                text=f"🔢 **Unit of Measure**\n\nAre you buying in Bags or KGs?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            )
+             await state.set_state(ExpenseStates.new_inv_unit) # Use this state temp or new one? Reuse or skip to quantity logic
+        else:
+             await callback.message.edit_text(
+                text=f"🔢 **Quantity**\n\nHow many **{unit}** are you buying?",
+                parse_mode="Markdown"
+            )
+             await state.set_state(ExpenseStates.inv_quantity)
+    await callback.answer()
+
+@router.callback_query(ExpenseStates.new_inv_unit, F.data.startswith("uom_"))
+async def receive_feed_uom(callback: types.CallbackQuery, state: FSMContext):
+    uom = callback.data.split("_")[1]
+    await state.update_data(feed_input_uom=uom)
+    
+    unit_label = "Bags" if uom == "bags" else "KGs"
+    await callback.message.edit_text(f"🔢 **Quantity**\n\nHow many **{unit_label}**?")
+    await state.set_state(ExpenseStates.inv_quantity)
     await callback.answer()
 
 @router.message(ExpenseStates.new_inv_name)
@@ -261,7 +324,11 @@ async def receive_payment_method(callback: types.CallbackQuery, state: FSMContex
         )
         await state.set_state(ExpenseStates.transaction_ref)
     else:
-        await finalize_expense(callback.message, state) # No code needed for Cash/Credit
+        data = await state.get_data()
+        if data.get('sale_mode'):
+            await finalize_sale(callback.message, state)
+        else:
+            await finalize_expense(callback.message, state)
     
     await callback.answer()
 
@@ -269,7 +336,12 @@ async def receive_payment_method(callback: types.CallbackQuery, state: FSMContex
 async def receive_ref(message: types.Message, state: FSMContext):
     ref = message.text.upper()
     await state.update_data(transaction_ref=ref)
-    await finalize_expense(message, state)
+    
+    data = await state.get_data()
+    if data.get('sale_mode'):
+         await finalize_sale(message, state)
+    else:
+         await finalize_expense(message, state)
 
 async def finalize_expense(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -337,16 +409,32 @@ async def finalize_expense(message: types.Message, state: FSMContext):
                 item.cost_per_unit = unit_cost
         
         if item:
-            item.quantity += qty
+            final_qty = qty
+            
+            # Feed Conversion: If bought in Bags but stored in KG
+            if data.get('feed_input_uom') == 'bags' and item.unit == 'kg':
+                 # Get Dynamic Weight
+                 setting = db.query(SystemSettings).filter_by(key="feed_bag_weight").first()
+                 bag_weight = float(setting.value) if setting else 70.0
+                 
+                 final_qty = qty * bag_weight 
+                 # Recalculate cost per unit (per KG)
+                 # Total Amount / Total KG
+                 unit_cost = amount / final_qty
+                 item.cost_per_unit = unit_cost
+                 
+            item.quantity += final_qty
             
             # Log
             log = InventoryLog(
                 item_name=item.name,
-                quantity_change=qty,
+                quantity_change=final_qty,
                 ledger_id=ledger.id
             )
             db.add(log)
-            inv_msg = f"\n📦 Stock Updated: +{qty} {unit}"
+            inv_msg = f"\n📦 Stock Updated: +{final_qty} {item.unit}"
+            if data.get('feed_input_uom') == 'bags':
+                inv_msg += f" ({qty} bags)"
 
     db.commit()
     db.close()
@@ -365,3 +453,209 @@ async def finalize_expense(message: types.Message, state: FSMContext):
     )
 
 
+
+# --- SALES / INCOME HANDLERS ---
+
+@router.callback_query(ExpenseStates.sale_customer, F.data.startswith("cust_"))
+async def select_sale_customer(callback: types.CallbackQuery, state: FSMContext):
+    cust_id = callback.data.split("_")[1]
+    if cust_id == "generic":
+        cust_id = None
+        cust_name = "Walk-in Info"
+    else:
+        db = next(get_db())
+        cust = db.query(Contact).filter_by(id=cust_id).first()
+        cust_name = cust.name if cust else "Unknown"
+        db.close()
+
+    await state.update_data(customer_id=cust_id, customer_name=cust_name)
+    
+    keyboard = [
+        [InlineKeyboardButton(text="🥚 Per Egg", callback_data='mode_egg'),
+         InlineKeyboardButton(text="📦 Per Crate", callback_data='mode_crate')],
+        [InlineKeyboardButton(text="🐥 Birds (Culls/Stock)", callback_data='mode_bird')],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data='fin_income_start')]
+    ]
+    
+    await callback.message.edit_text(
+        text=f"🛒 **Selling to: {cust_name}**\n\nWhat are they buying?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await state.set_state(ExpenseStates.sale_mode)
+    await callback.answer()
+
+@router.callback_query(ExpenseStates.sale_mode, F.data.startswith("mode_"))
+async def receive_sale_mode(callback: types.CallbackQuery, state: FSMContext):
+    mode = callback.data
+    await state.update_data(sale_mode=mode)
+    
+    unit = "eggs"
+    if mode == 'mode_crate': unit = "crates"
+    elif mode == 'mode_bird': unit = "birds"
+    
+    await callback.message.edit_text(
+        text=f"🔢 **Quantity**\n\nHow many {unit}?",
+        parse_mode="Markdown"
+    )
+    await state.set_state(ExpenseStates.sale_quantity)
+    await callback.answer()
+
+@router.message(ExpenseStates.sale_quantity)
+async def receive_sale_qty(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return
+    qty = int(message.text)
+    
+    data = await state.get_data()
+    mode = data.get('sale_mode')
+    
+    # Check Stock
+    # Check Stock
+    db = next(get_db())
+    today = date.today()
+    
+    if mode in ['mode_egg', 'mode_crate']:
+        # Check Eggs
+        egg_item = db.query(InventoryItem).filter_by(name="Eggs").first()
+        current_stock = egg_item.quantity if egg_item else 0
+        
+        if current_stock < qty:
+             await message.answer(
+                 f"⛔ **Not enough eggs!**\n\nStock: {current_stock} eggs\nTrying to sell: {qty} eggs\n\nTry a lower amount:",
+                 reply_markup=get_back_home_keyboard('menu_finance')
+             )
+             db.close()
+             return
+
+    elif mode == 'mode_crate':
+        eggs_needed = qty * 30
+        entry = db.query(DailyEntry).filter_by(date=today).first()
+        current_stock = entry.eggs_good if entry else 0
+        
+        if current_stock < eggs_needed:
+             await message.answer(
+                 f"⛔ **Not enough eggs for crates!**\n\nStock: {current_stock} eggs\nNeeded: {eggs_needed} eggs\n\nTry fewer crates:",
+                 reply_markup=get_back_home_keyboard('menu_finance')
+             )
+             db.close()
+             return
+
+    elif mode == 'mode_bird':
+        entry = db.query(DailyEntry).filter_by(date=today).first()
+        last = db.query(DailyEntry).filter(DailyEntry.date < today).order_by(desc(DailyEntry.date)).first()
+        current_flock = entry.flock_total if entry else (last.flock_total if last else 0)
+        
+        if current_flock < qty:
+            await message.answer(
+                f"⛔ **Not enough birds!**\n\nFlock Count: {current_flock}\nTrying to sell: {qty}\n\nTry a lower amount:",
+                reply_markup=get_back_home_keyboard('menu_finance')
+            )
+            db.close()
+            return
+            
+    db.close()
+    await state.update_data(sale_qty=qty)
+    
+    # Calculate or Ask Price
+    price = 0.0
+    
+    if mode == 'mode_bird':
+        await message.answer("💸 **Total Price** for these birds:")
+        await state.set_state(ExpenseStates.sale_price)
+    else:
+        db = next(get_db())
+        # defaults
+        p_egg = 15.0
+        p_crate = 450.0
+        
+        s_egg = db.query(SystemSettings).filter_by(key="price_per_egg").first()
+        s_crate = db.query(SystemSettings).filter_by(key="price_per_crate").first()
+        if s_egg: p_egg = float(s_egg.value)
+        if s_crate: p_crate = float(s_crate.value)
+        db.close()
+        
+        if mode == 'mode_egg': price = qty * p_egg
+        else: price = qty * p_crate
+        
+        await state.update_data(amount=price)
+        await ask_payment_input(message, state, price)
+
+@router.message(ExpenseStates.sale_price)
+async def receive_sale_price(message: types.Message, state: FSMContext):
+    try:
+        price = float(message.text)
+        await state.update_data(amount=price)
+        await ask_payment_input(message, state, price)
+    except:
+        await message.answer("Invalid price.")
+
+async def ask_payment_input(message, state, amount):
+    keyboard = [
+        [InlineKeyboardButton(text="💵 Cash", callback_data='pay_CASH')],
+        [InlineKeyboardButton(text="📱 M-Pesa", callback_data='pay_MPESA')],
+        [InlineKeyboardButton(text="💳 Credit / Later", callback_data='pay_CREDIT')]
+    ]
+    await message.answer(
+        text=f"�� **Payment**\n\nTotal: {format_currency(amount)}\nMethod?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await state.set_state(ExpenseStates.payment_method)
+
+async def finalize_sale(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    db = next(get_db())
+    
+    mode = data.get('sale_mode')
+    qty = data.get('sale_qty')
+    total = data.get('amount')
+    method = data.get('payment_method')
+    ref = data.get('transaction_ref', None)
+    cust_id = data.get('customer_id')
+    
+    item_name = "Eggs"
+    if mode == 'mode_crate': item_name = "Egg Crates"
+    elif mode == 'mode_bird': item_name = "Birds/Meat"
+    
+    # 1. Financial Ledger - IN
+    ledger = FinancialLedger(
+        amount=total,
+        direction="IN",
+        payment_method=method,
+        transaction_ref=ref,
+        category="Sales",
+        description=f"Sold {qty} {item_name}",
+        contact_id=cust_id
+    )
+    db.add(ledger)
+    db.flush()
+    
+    # 2. Daily Entry
+    today = date.today()
+    entry = db.query(DailyEntry).filter(DailyEntry.date == today).first()
+    if not entry:
+        entry = DailyEntry(date=today)
+        db.add(entry)
+    
+    entry.income += total
+    if mode == 'mode_egg': entry.eggs_sold += qty
+    elif mode == 'mode_crate': entry.crates_sold += qty
+    elif mode == 'mode_bird':
+        if entry.flock_removed is None: entry.flock_removed = 0
+        entry.flock_removed += qty
+        
+    # 3. Inventory Deduction
+    # Sales decrement inventory as INCOME -> Item leaves farm
+    inv_msg = ""
+    # Simple logic
+    inv_log = InventoryLog(item_name=item_name, quantity_change=-qty, ledger_id=ledger.id)
+    db.add(inv_log)
+    
+    db.commit()
+    cust_name = data.get('customer_name')
+    db.close()
+    
+    await state.clear()
+    await message.answer(
+        text=f"✅ **Sale Recorded!**\n\n👤 {cust_name}\n📦 {qty} {item_name}\n💰 {format_currency(total)}",
+        reply_markup=get_main_menu_keyboard()
+    )

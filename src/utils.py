@@ -5,10 +5,7 @@ def get_main_menu_keyboard():
     demo_label = "🔴 Demo Mode Active" if database.IS_DEMO_MODE else "🎮 Demo Mode"
     
     keyboard = [
-        [InlineKeyboardButton(text="🥚 Eggs", callback_data='menu_eggs'),
-         InlineKeyboardButton(text="🍽️ Feed", callback_data='menu_feed')],
-        [InlineKeyboardButton(text="🐥 Flock", callback_data='menu_flock'),
-         InlineKeyboardButton(text="💰 Sales", callback_data='menu_sales')],
+        [InlineKeyboardButton(text="📝 Daily Update", callback_data='menu_daily_wizard')],
         [InlineKeyboardButton(text="💵 Finance", callback_data='menu_finance'),
          InlineKeyboardButton(text="📦 Inventory", callback_data='menu_inventory')],
         [InlineKeyboardButton(text="📊 Reports", callback_data='menu_reports'),

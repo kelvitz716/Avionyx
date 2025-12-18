@@ -17,10 +17,10 @@ async def main():
     # Import routers here to avoid circular deps if any, 
     # but strictly speaking we should import them at top.
     # We will need to create routers in modules first.
-    from modules.eggs import router as eggs_router
-    from modules.sales import router as sales_router
-    from modules.feed import router as feed_router
-    from modules.flock import router as flock_router
+    # from modules.eggs import router as eggs_router
+    # from modules.sales import router as sales_router
+    # from modules.feed import router as feed_router
+    # from modules.flock import router as flock_router
     from modules.reports import router as reports_router
     from modules.settings import router as settings_router
     from modules.alerts import router as alerts_router
@@ -29,10 +29,10 @@ async def main():
     from modules.contacts import router as contacts_router
     from modules.demo import router as demo_router
     
-    dp.include_router(eggs_router)
-    dp.include_router(sales_router)
-    dp.include_router(feed_router)
-    dp.include_router(flock_router)
+    # dp.include_router(eggs_router) # Removed
+    # dp.include_router(sales_router) # Removed
+    # dp.include_router(feed_router) # Removed
+    # dp.include_router(flock_router) # Removed
     dp.include_router(reports_router)
     dp.include_router(settings_router)
     dp.include_router(alerts_router)
@@ -40,6 +40,9 @@ async def main():
     dp.include_router(inventory_router)
     dp.include_router(contacts_router)
     dp.include_router(demo_router)
+    
+    from modules.daily_wizard import router as wizard_router
+    dp.include_router(wizard_router)
 
     # Main Menu Handler (attached to dp directly for now or a common router)
     from utils import get_main_menu_keyboard
